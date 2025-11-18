@@ -3487,11 +3487,6 @@ export default function WerkstattVerwaltungApp() {
     return !choices || choices.length === 0;
   }
 
-  // Get all students without votes for the active band
-  function getStudentsWithoutVotes() {
-    return students.filter(s => hasNoVotesForBand(s, activeBand));
-  }
-
   // Check for students with same first choice in both bands
   function getStudentsWithSameFirstChoiceInBothBands() {
     const erstesBandChoices = getChoicesForBand('erstesBand');
