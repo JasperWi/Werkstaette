@@ -1,0 +1,14 @@
+# Commands to push to GitHub
+# Replace YOUR_USERNAME and YOUR_REPO_NAME with your actual values
+
+cd werkstatt-verwaltung
+
+# Add the remote repository
+git remote add origin https://github.com/YOUR_USERNAME/YOUR_REPO_NAME.git
+
+# Rename branch to 'main' (GitHub's default)
+git branch -M main
+
+# Push your code to GitHub
+git push -u origin main
+
