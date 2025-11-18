@@ -1,38 +1,655 @@
-.App {
-  text-align: center;
+/* Werkstatt Verwaltung App Styles */
+* {
+  box-sizing: border-box;
 }
 
-.App-logo {
-  height: 40vmin;
-  pointer-events: none;
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu', 'Cantarell', sans-serif;
+  background-color: #f8fafc;
+  color: #1e293b;
+  line-height: 1.6;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  .App-logo {
-    animation: App-logo-spin infinite 20s linear;
-  }
+.app-container {
+  padding: 24px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
-.App-header {
-  background-color: #282c34;
-  min-height: 100vh;
+/* Header */
+.app-header {
   display: flex;
-  flex-direction: column;
   align-items: center;
-  justify-content: center;
-  font-size: calc(10px + 2vmin);
+  justify-content: space-between;
+  margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #e2e8f0;
+}
+
+.app-title {
+  font-size: 28px;
+  font-weight: 700;
+  color: #1e293b;
+  margin: 0;
+}
+
+.nav-buttons {
+  display: flex;
+  gap: 8px;
+}
+
+.nav-button {
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  background-color: #e2e8f0;
+  color: #475569;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.nav-button:hover {
+  background-color: #cbd5e1;
+}
+
+.nav-button.active {
+  background-color: #3b82f6;
   color: white;
 }
 
-.App-link {
-  color: #61dafb;
+/* Sections */
+.section {
+  background: white;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+  padding: 24px;
+  margin-bottom: 24px;
 }
 
-@keyframes App-logo-spin {
-  from {
-    transform: rotate(0deg);
+/* Students Tab */
+.students-layout {
+  display: flex;
+  gap: 24px;
+}
+
+.students-sidebar {
+  width: 300px;
+}
+
+.students-main {
+  flex: 1;
+}
+
+.search-input {
+  width: 100%;
+  padding: 12px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.search-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.students-list {
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.student-item {
+  padding: 12px 16px;
+  cursor: pointer;
+  border-bottom: 1px solid #f1f5f9;
+  transition: background-color 0.2s ease;
+}
+
+.student-item:hover {
+  background-color: #f8fafc;
+}
+
+.student-item.selected {
+  background-color: #dbeafe;
+  border-left: 4px solid #3b82f6;
+}
+
+.student-details {
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 24px;
+  min-height: 400px;
+}
+
+.student-name {
+  font-size: 20px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: #1e293b;
+}
+
+.detail-section {
+  margin-bottom: 20px;
+}
+
+.detail-label {
+  font-weight: 600;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.detail-content {
+  color: #6b7280;
+}
+
+.violations-list {
+  list-style-type: disc;
+  margin-left: 20px;
+}
+
+.violations-list li {
+  margin-bottom: 4px;
+  color: #dc2626;
+}
+
+/* Wahl Tab */
+.wahl-controls {
+  display: flex;
+  gap: 12px;
+  margin-bottom: 24px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.action-button {
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.btn-primary {
+  background-color: #3b82f6;
+  color: white;
+}
+
+.btn-primary:hover {
+  background-color: #2563eb;
+}
+
+.btn-success {
+  background-color: #10b981;
+  color: white;
+}
+
+.btn-success:hover {
+  background-color: #059669;
+}
+
+.btn-warning {
+  background-color: #f59e0b;
+  color: white;
+}
+
+.btn-warning:hover {
+  background-color: #d97706;
+}
+
+.year-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
+}
+
+.year-controls label {
+  font-weight: 500;
+  color: #374151;
+}
+
+.year-input {
+  width: 80px;
+  padding: 6px 8px;
+  border: 2px solid #e2e8f0;
+  border-radius: 4px;
+}
+
+.trimester-select {
+  padding: 6px 8px;
+  border: 2px solid #e2e8f0;
+  border-radius: 4px;
+}
+
+.wahl-grid {
+  display: grid;
+  grid-template-columns: 1fr 2fr;
+  gap: 24px;
+}
+
+.wahl-panel {
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.panel-title {
+  font-weight: 600;
+  margin-bottom: 12px;
+  color: #1e293b;
+}
+
+.choice-item {
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.choice-student {
+  font-weight: 500;
+  color: #374151;
+}
+
+.choice-courses {
+  font-size: 14px;
+  color: #6b7280;
+  margin-top: 2px;
+}
+
+.assignments-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 16px;
+}
+
+.assignments-table th,
+.assignments-table td {
+  padding: 12px;
+  text-align: left;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.assignments-table th {
+  background-color: #f8fafc;
+  font-weight: 600;
+  color: #374151;
+}
+
+.assignment-select {
+  padding: 6px 8px;
+  border: 2px solid #e2e8f0;
+  border-radius: 4px;
+  background-color: white;
+}
+
+.problems-section {
+  margin-bottom: 16px;
+  padding: 12px;
+  background-color: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+}
+
+.problems-title {
+  font-weight: 600;
+  color: #dc2626;
+  margin-bottom: 8px;
+}
+
+.problems-list {
+  list-style-type: disc;
+  margin-left: 20px;
+  color: #dc2626;
+}
+
+.problems-list li {
+  margin-bottom: 4px;
+}
+
+.stats-info {
+  margin-top: 12px;
+  padding: 8px 12px;
+  background-color: #f0f9ff;
+  border: 1px solid #bae6fd;
+  border-radius: 6px;
+  color: #0369a1;
+}
+
+/* Workshops Tab */
+.workshops-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.workshop-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.workshop-info {
+  flex: 1;
+}
+
+.workshop-name {
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 4px;
+}
+
+.workshop-capacity {
+  font-size: 14px;
+  color: #6b7280;
+}
+
+.workshop-controls {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.capacity-input {
+  width: 80px;
+  padding: 6px 8px;
+  border: 2px solid #e2e8f0;
+  border-radius: 4px;
+}
+
+.btn-danger {
+  background-color: #dc2626;
+  color: white;
+  padding: 6px 12px;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 14px;
+}
+
+.btn-danger:hover {
+  background-color: #b91c1c;
+}
+
+.add-workshop-form {
+  padding: 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.form-input {
+  width: 100%;
+  padding: 10px 12px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #3b82f6;
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.btn-green {
+  background-color: #10b981;
+  color: white;
+  padding: 10px 20px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.btn-green:hover {
+  background-color: #059669;
+}
+
+/* Rules Tab */
+.rules-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+
+.rules-panel {
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 16px;
+}
+
+.rules-list {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.rule-item {
+  padding: 16px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.rule-name {
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 4px;
+}
+
+.rule-description {
+  font-size: 14px;
+  color: #6b7280;
+  margin-bottom: 8px;
+}
+
+.rule-controls {
+  margin-top: 8px;
+}
+
+.create-rule-form {
+  padding: 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+}
+
+.form-label {
+  font-weight: 500;
+  color: #374151;
+  margin-bottom: 8px;
+}
+
+.checkbox-container {
+  max-height: 200px;
+  overflow-y: auto;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 12px;
+  margin-bottom: 12px;
+}
+
+.checkbox-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+}
+
+.checkbox-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+}
+
+.checkbox-label {
+  color: #374151;
+  cursor: pointer;
+}
+
+/* Workshop Overview in Wahl Tab */
+.workshop-overview {
+  margin-bottom: 24px;
+  padding: 16px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  background-color: #f8fafc;
+}
+
+.workshop-counts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.workshop-count-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px;
+  border: 2px solid #e2e8f0;
+  border-radius: 6px;
+  background-color: white;
+}
+
+.workshop-count-item.over-capacity {
+  border-color: #dc2626;
+  background-color: #fef2f2;
+}
+
+.workshop-count-name {
+  font-weight: 500;
+  color: #374151;
+}
+
+.workshop-count-number {
+  font-weight: 600;
+  color: #374151;
+}
+
+.workshop-count-number.over-capacity-text {
+  color: #dc2626;
+}
+
+/* Workshop Prerequisites */
+.workshop-prereqs {
+  font-size: 12px;
+  color: #6b7280;
+  margin-top: 4px;
+}
+
+/* Dialog Styles */
+.dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.dialog-content {
+  background: white;
+  border-radius: 8px;
+  padding: 24px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.dialog-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin-bottom: 16px;
+  color: #1e293b;
+}
+
+.prereq-list {
+  max-height: 300px;
+  overflow-y: auto;
+  margin-bottom: 20px;
+}
+
+.prereq-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 0;
+  border-bottom: 1px solid #f1f5f9;
+}
+
+.prereq-checkbox {
+  width: 16px;
+  height: 16px;
+}
+
+.prereq-label {
+  color: #374151;
+  cursor: pointer;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+}
+
+.btn-secondary {
+  background-color: #6b7280;
+  color: white;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+  font-weight: 500;
+}
+
+.btn-secondary:hover {
+  background-color: #4b5563;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .app-container {
+    padding: 16px;
   }
-  to {
-    transform: rotate(360deg);
+  
+  .students-layout {
+    flex-direction: column;
+  }
+  
+  .students-sidebar {
+    width: 100%;
+  }
+  
+  .wahl-grid,
+  .workshops-grid,
+  .rules-grid {
+    grid-template-columns: 1fr;
+  }
+  
+  .nav-buttons {
+    flex-wrap: wrap;
+  }
+  
+  .wahl-controls {
+    flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .year-controls {
+    margin-left: 0;
+    justify-content: center;
   }
 }
