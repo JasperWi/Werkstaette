@@ -2109,27 +2109,6 @@ export default function WerkstattVerwaltungApp() {
     return `Schuljahr ${schoolYearStart}/${schoolYearEnd}, ${trimesterNames[trimester]}`;
   }
 
-  function saveConfirmedAssignments() {
-    // confirm/official: include school year & trimester metadata per requirement. Overwrite previous if same school year & trimester.
-    // We will store assignments keyed by "YYYY-YYYY T#" e.g. "2025-2026 T1"
-    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-    const payload = load(LS_KEYS.assignments, {});
-    payload[key] = { 
-      assignments: dragAssignments, 
-      timestamp: new Date().toISOString(),
-      bands: ['erstesBand', 'zweitesBand'] // Track that this contains both Bands
-    };
-    save(LS_KEYS.assignments, payload);
-    setConfirmedAssignments(payload);
-    
-    // Export to CSV by school year/trimester
-    exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments);
-    
-    // Update priority scores based on assignment results
-    updatePriorityScores(dragAssignments, uploadedChoices);
-    
-    alert(`Zuweisungen für ${key} (beide Bänder) wurden als offiziell gespeichert und als CSV exportiert.`);
-  }
 
   // Calculate priority score history over time for a student
   function calculatePriorityScoreHistory(student) {
