@@ -519,6 +519,54 @@ async function exportAllDataAsZIP(allData) {
           
           zip.file(`assignments/${slotKey}.csv`, dataToCSVString(csvData.slice(1), csvData[0]));
         });
+      } else if (keyName === 'choices') {
+        // Export choices separately by year/trimester (stored with pattern wv_choices_${key})
+        // We need to load all choices from localStorage
+        const allChoicesKeys = [];
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('wv_choices_')) {
+            allChoicesKeys.push(key);
+          }
+        }
+        
+        allChoicesKeys.forEach(choicesKey => {
+          try {
+            const choicesData = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
+            if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
+              // Extract the slotKey from the choicesKey (format: wv_choices_${slotKey})
+              const slotKey = choicesKey.replace('wv_choices_', '');
+              
+              // Export erstesBand choices
+              const erstesBandData = [];
+              erstesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+              Object.entries(choicesData.erstesBand || {}).forEach(([student, choices]) => {
+                if (Array.isArray(choices) && choices.length > 0) {
+                  erstesBandData.push([student, choices[0] || '', choices[1] || '']);
+                }
+              });
+              
+              if (erstesBandData.length > 1) {
+                zip.file(`choices/${slotKey}_erstesBand.csv`, dataToCSVString(erstesBandData.slice(1), erstesBandData[0]));
+              }
+              
+              // Export zweitesBand choices
+              const zweitesBandData = [];
+              zweitesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+              Object.entries(choicesData.zweitesBand || {}).forEach(([student, choices]) => {
+                if (Array.isArray(choices) && choices.length > 0) {
+                  zweitesBandData.push([student, choices[0] || '', choices[1] || '']);
+                }
+              });
+              
+              if (zweitesBandData.length > 1) {
+                zip.file(`choices/${slotKey}_zweitesBand.csv`, dataToCSVString(zweitesBandData.slice(1), zweitesBandData[0]));
+              }
+            }
+          } catch (error) {
+            console.error(`Failed to export choices for ${choicesKey}:`, error);
+          }
+        });
       } else {
         const data = allData[lsKey];
         const config = EXPORT_CONFIG[lsKey];
@@ -733,6 +781,33 @@ async function importDataFromZIP(file) {
           timestamp: rows[0]?.[3] || new Date().toISOString(),
           bands: ['erstesBand', 'zweitesBand']
         };
+      } else if (filename.startsWith('choices/')) {
+        // Import choices for a specific trimester
+        // Format: choices/${slotKey}_erstesBand.csv or choices/${slotKey}_zweitesBand.csv
+        const choicesFilename = filename.replace('choices/', '').replace('.csv', '');
+        const parts = choicesFilename.split('_');
+        if (parts.length >= 2) {
+          const band = parts[parts.length - 1]; // 'erstesBand' or 'zweitesBand'
+          const slotKey = parts.slice(0, -1).join('_'); // Everything before the last underscore
+          
+          const choicesKey = `wv_choices_${slotKey}`;
+          if (!importedData[choicesKey]) {
+            importedData[choicesKey] = { erstesBand: {}, zweitesBand: {} };
+          }
+          
+          // Parse choices from CSV (format: Student, Wahl 1, Wahl 2)
+          rows.forEach(row => {
+            if (row[0]) {
+              const student = row[0].trim();
+              const choices = [];
+              if (row[1] && row[1].trim()) choices.push(row[1].trim());
+              if (row[2] && row[2].trim()) choices.push(row[2].trim());
+              if (choices.length > 0) {
+                importedData[choicesKey][band][student] = choices;
+              }
+            }
+          });
+        }
       } else {
         // Map filename to data key
         const keyMap = {
@@ -3347,6 +3422,16 @@ export default function WerkstattVerwaltungApp() {
       if (importedData.assignments) {
         setConfirmedAssignments(importedData.assignments);
       }
+      
+      // Import choices for all trimesters (stored with pattern wv_choices_${key})
+      Object.keys(importedData).forEach(key => {
+        if (key.startsWith('wv_choices_')) {
+          const choicesData = importedData[key];
+          if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
+            save(key, choicesData, false); // Don't auto-export choices
+          }
+        }
+      });
       
       alert('Daten wurden erfolgreich importiert!');
       
