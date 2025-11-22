@@ -1,8 +1,9 @@
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useRef } from "react";
 import JSZip from "jszip";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./components/ui/dialog";
 
 // WerkstattVerwaltungApp.jsx
 // Single-file React app (Tailwind CSS assumed) providing an administrative GUI
@@ -96,6 +97,7 @@ const LS_KEYS = {
   studentAssistants: "wv_studentAssistants", // NEW: map student -> boolean
   studentClasses: "wv_studentClasses", // NEW: map student -> class name
   studentPriorityScores: "wv_studentPriorityScores", // NEW: map student -> priority score (1-10)
+  studentPriorityScoresLastChanged: "wv_studentPriorityScoresLastChanged", // NEW: map student -> ISO timestamp of last manual change
   workshopColors: "wv_workshopColors", // NEW: map workshop -> color hex
   studentComments: "wv_studentComments", // NEW: map student -> comment/notes
   workshopTeachers: "wv_workshopTeachers", // NEW: map workshop -> teacher name
@@ -247,15 +249,15 @@ function parseCSVToData(key, csvData) {
       });
       return result;
     } else if (key === 'wv_prevAssignments' || key === 'wv_prereqs' || key === 'wv_cannotBeParallel' || key === 'wv_studentTrimesters' || 
-               key === 'wv_studentAssistants' || key === 'wv_studentClasses' || key === 'wv_studentPriorityScores' ||
+               key === 'wv_studentAssistants' || key === 'wv_studentClasses' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' ||
                key === 'wv_workshopColors' || key === 'wv_studentComments' || key === 'wv_workshopTeachers' || key === 'wv_workshopRooms' || key === 'wv_archivedWorkshops') {
       const result = {};
       rows.forEach(row => {
         if (key === 'wv_studentAssistants') {
           result[row[0]] = row[1] === 'Ja' || row[1] === 'true';
-        } else if (key === 'wv_studentTrimesters' || key === 'wv_studentPriorityScores' || key === 'wv_studentComments' || 
+        } else if (key === 'wv_studentTrimesters' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' || key === 'wv_studentComments' || 
                    key === 'wv_workshopTeachers' || key === 'wv_workshopRooms') {
-          // For comments, teachers, rooms, preserve the value as-is (may contain newlines, semicolons, etc.)
+          // For comments, teachers, rooms, timestamps, preserve the value as-is (may contain newlines, semicolons, etc.)
           result[row[0]] = row[1] || '';
         } else if (key === 'wv_prereqs' || key === 'wv_cannotBeParallel') {
           result[row[0]] = row[1] ? row[1].split(',').map(s => s.trim()) : [];
@@ -317,6 +319,7 @@ const EXPORT_CONFIG = {
   'wv_studentAssistants': { filename: 'student-assistants.csv', headers: ['Student', 'NeedsAssistance'] },
   'wv_studentClasses': { filename: 'student-classes.csv', headers: ['Student', 'Class'] },
   'wv_studentPriorityScores': { filename: 'priority-scores.csv', headers: ['Student', 'PriorityScore'] },
+  'wv_studentPriorityScoresLastChanged': { filename: 'priority-scores-last-changed.csv', headers: ['Student', 'LastChanged'] },
   'wv_workshopColors': { filename: 'workshop-colors.csv', headers: ['Workshop', 'Color'] },
   'wv_studentComments': { filename: 'student-comments.csv', headers: ['Student', 'Comment'] },
   'wv_workshopTeachers': { filename: 'workshop-teachers.csv', headers: ['Workshop', 'Teacher'] },
@@ -582,6 +585,8 @@ async function exportAllDataAsZIP(allData) {
             csvData = Object.entries(data).map(([student, className]) => [student, className]);
           } else if (lsKey === 'wv_studentPriorityScores') {
             csvData = Object.entries(data).map(([student, score]) => [student, score]);
+          } else if (lsKey === 'wv_studentPriorityScoresLastChanged') {
+            csvData = Object.entries(data).map(([student, timestamp]) => [student, timestamp || '']);
           } else if (lsKey === 'wv_studentComments') {
             // Properly escape comments for CSV (handle semicolons, quotes, newlines)
             csvData = Object.entries(data).map(([student, comment]) => {
@@ -741,6 +746,7 @@ async function importDataFromZIP(file) {
           'student-assistants.csv': 'wv_studentAssistants',
           'student-classes.csv': 'wv_studentClasses',
           'priority-scores.csv': 'wv_studentPriorityScores',
+          'priority-scores-last-changed.csv': 'wv_studentPriorityScoresLastChanged',
           'workshop-colors.csv': 'wv_workshopColors',
           'student-comments.csv': 'wv_studentComments',
           'workshop-teachers.csv': 'wv_workshopTeachers',
@@ -1241,6 +1247,7 @@ export default function WerkstattVerwaltungApp() {
     const [studentAssistants, setStudentAssistants] = useState(() => load(LS_KEYS.studentAssistants, {})); // NEW
   const [studentClasses, setStudentClasses] = useState(() => load(LS_KEYS.studentClasses, {})); // NEW: store class information for each student
   const [studentPriorityScores, setStudentPriorityScores] = useState(() => load(LS_KEYS.studentPriorityScores, {})); // NEW: map student -> priority score (1-10)
+  const [studentPriorityScoresLastChanged, setStudentPriorityScoresLastChanged] = useState(() => load(LS_KEYS.studentPriorityScoresLastChanged, {})); // NEW: map student -> ISO timestamp of last manual change
   const [workshopColors, setWorkshopColors] = useState(() => load(LS_KEYS.workshopColors, {})); // NEW: map workshop -> color hex
   const [studentComments, setStudentComments] = useState(() => load(LS_KEYS.studentComments, {})); // NEW: map student -> comment/notes
   const [workshopTeachers, setWorkshopTeachers] = useState(() => {
@@ -1276,6 +1283,7 @@ export default function WerkstattVerwaltungApp() {
     useEffect(() => save(LS_KEYS.studentAssistants, studentAssistants), [studentAssistants]); // persist assistants
   useEffect(() => save(LS_KEYS.studentClasses, studentClasses), [studentClasses]); // persist student classes
   useEffect(() => save(LS_KEYS.studentPriorityScores, studentPriorityScores), [studentPriorityScores]); // persist priority scores
+  useEffect(() => save(LS_KEYS.studentPriorityScoresLastChanged, studentPriorityScoresLastChanged), [studentPriorityScoresLastChanged]); // persist last changed timestamps
   useEffect(() => save(LS_KEYS.workshopColors, workshopColors), [workshopColors]); // persist workshop colors
   useEffect(() => save(LS_KEYS.studentComments, studentComments), [studentComments]); // persist student comments
   // Skip saving on initial mount to avoid overwriting loaded data
@@ -1339,11 +1347,204 @@ export default function WerkstattVerwaltungApp() {
     const saved = localStorage.getItem('wv_checkedWarnings');
     return saved ? JSON.parse(saved) : {};
   }); // Track which warnings have been checked off
+  const [showTrimesterDialog, setShowTrimesterDialog] = useState(false);
+  const [showReportsTrimesterDialog, setShowReportsTrimesterDialog] = useState(false);
+  const [dialogYearTrimester, setDialogYearTrimester] = useState(() => {
+    const defaultSchoolYear = getDefaultSchoolYear();
+    return { 
+      schoolYearStart: defaultSchoolYear.schoolYearStart, 
+      schoolYearEnd: defaultSchoolYear.schoolYearEnd, 
+      trimester: 1 
+    };
+  });
+  const hasVisitedWahlTab = useRef(false);
+  const currentTrimesterKeyRef = useRef(null);
   
-  // Persist checked warnings
+  // Load assignments and choices when year/trimester changes or when first visiting wahl tab
   useEffect(() => {
-    localStorage.setItem('wv_checkedWarnings', JSON.stringify(checkedWarnings));
-  }, [checkedWarnings]);
+    // Only load when entering wahl tab, not when leaving it
+    if (tab !== 'wahl') return;
+    
+    // Mark that we've visited the wahl tab
+    if (!hasVisitedWahlTab.current) {
+      hasVisitedWahlTab.current = true;
+    }
+    
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    
+    // Update the ref immediately to prevent auto-save from saving old data
+    currentTrimesterKeyRef.current = key;
+    
+    // Load assignments for this year/trimester
+    const savedAssignments = confirmedAssignments[key];
+    if (savedAssignments && savedAssignments.assignments) {
+      // Check if there are actually any real assignments (not just undefined or empty values)
+      const hasErstesBand = savedAssignments.assignments.erstesBand && 
+        Object.entries(savedAssignments.assignments.erstesBand).some(([student, assignment]) => 
+          assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
+        );
+      const hasZweitesBand = savedAssignments.assignments.zweitesBand && 
+        Object.entries(savedAssignments.assignments.zweitesBand).some(([student, assignment]) => 
+          assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
+        );
+      
+      if (hasErstesBand || hasZweitesBand) {
+        // Only load if there are actual assignments
+        setDragAssignments(savedAssignments.assignments);
+      } else {
+        // If assignments object exists but has no real assignments, reset to empty
+        const emptyAssignments = { erstesBand: {}, zweitesBand: {} };
+        students.forEach(student => {
+          emptyAssignments.erstesBand[student] = undefined;
+          emptyAssignments.zweitesBand[student] = undefined;
+        });
+        setDragAssignments(emptyAssignments);
+      }
+    } else {
+      // If no assignments exist, set empty assignments for all students
+      const emptyAssignments = { erstesBand: {}, zweitesBand: {} };
+      students.forEach(student => {
+        emptyAssignments.erstesBand[student] = undefined;
+        emptyAssignments.zweitesBand[student] = undefined;
+      });
+      setDragAssignments(emptyAssignments);
+    }
+    
+    // Load choices for this year/trimester (stored in localStorage with key pattern)
+    const choicesKey = `wv_choices_${key}`;
+    const savedChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
+    if (savedChoices && (Object.keys(savedChoices.erstesBand || {}).length > 0 || Object.keys(savedChoices.zweitesBand || {}).length > 0)) {
+      setUploadedChoices(savedChoices);
+    } else {
+      // If no choices exist, set empty choices
+      setUploadedChoices({ erstesBand: {}, zweitesBand: {} });
+    }
+    
+    // Load autoResult for this year/trimester
+    const autoResultKey = `wv_autoResult_${key}`;
+    const savedAutoResult = load(autoResultKey, null);
+    if (savedAutoResult) {
+      setAutoResult(savedAutoResult);
+    } else {
+      setAutoResult(null);
+    }
+    
+    // Reset all warnings and violations when switching trimester
+    // Load checked warnings for this specific trimester (if they exist)
+    const warningsKey = `wv_checkedWarnings_${key}`;
+    const savedWarnings = load(warningsKey, {});
+    if (Object.keys(savedWarnings).length > 0) {
+      setCheckedWarnings(savedWarnings);
+    } else {
+      // If no warnings exist for this trimester, reset to empty
+      setCheckedWarnings({});
+    }
+    
+    // Reset violations (they are specific to current assignments)
+    setPersistentViolations({});
+    setDropViolations({});
+    
+    // Reset upload summary
+    setUploadSummary(null);
+  }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, confirmedAssignments, students, tab]);
+  
+  // Auto-save dragAssignments whenever they change (with debouncing to avoid too many saves)
+  useEffect(() => {
+    if (!hasVisitedWahlTab.current) return; // Don't save on initial mount
+    if (tab !== 'wahl') return; // Only save when in wahl tab
+    
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    
+    // Update the ref to track current trimester
+    currentTrimesterKeyRef.current = key;
+    
+    // Check if there are any actual assignments (not just undefined values)
+    const hasActualAssignments = Object.entries(dragAssignments.erstesBand || {}).some(([student, assignment]) => 
+      assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
+    ) || Object.entries(dragAssignments.zweitesBand || {}).some(([student, assignment]) => 
+      assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
+    );
+    
+    if (!hasActualAssignments) return;
+    
+    // Debounce the save to avoid too many writes
+    const timeoutId = setTimeout(() => {
+      // Double-check that we're still on the same trimester (prevent race condition)
+      const currentKey = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+      if (currentKey !== currentTrimesterKeyRef.current) {
+        // Trimester was changed, don't save
+        return;
+      }
+      
+      const payload = load(LS_KEYS.assignments, {});
+      payload[key] = { 
+        assignments: dragAssignments, 
+        timestamp: new Date().toISOString(),
+        bands: ['erstesBand', 'zweitesBand']
+      };
+      save(LS_KEYS.assignments, payload);
+      setConfirmedAssignments(payload);
+      
+      // Export to CSV by school year/trimester
+      exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments);
+      
+      // Update priority scores based on assignment results
+      updatePriorityScores(dragAssignments, uploadedChoices);
+    }, 500); // 500ms debounce
+    
+    return () => clearTimeout(timeoutId);
+  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices]);
+  
+  // Save assignments when leaving wahl tab (immediate save, no debounce)
+  useEffect(() => {
+    if (!hasVisitedWahlTab.current) return;
+    if (tab === 'wahl') return; // Only save when leaving wahl tab
+    
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    
+    // Check if there are any actual assignments
+    const hasAssignments = Object.keys(dragAssignments.erstesBand || {}).length > 0 || 
+                          Object.keys(dragAssignments.zweitesBand || {}).length > 0;
+    
+    if (!hasAssignments) return;
+    
+    const payload = load(LS_KEYS.assignments, {});
+    payload[key] = { 
+      assignments: dragAssignments, 
+      timestamp: new Date().toISOString(),
+      bands: ['erstesBand', 'zweitesBand']
+    };
+    save(LS_KEYS.assignments, payload);
+    setConfirmedAssignments(payload);
+    
+    // Export to CSV by school year/trimester
+    exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments);
+    
+    // Update priority scores based on assignment results
+    updatePriorityScores(dragAssignments, uploadedChoices);
+  }, [tab]); // Only trigger when tab changes
+  
+  // Save choices when they change (per year/trimester)
+  useEffect(() => {
+    if (!hasVisitedWahlTab.current) return; // Don't save on initial mount
+    
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    const choicesKey = `wv_choices_${key}`;
+    
+    // Only save if there are actual choices
+    if (Object.keys(uploadedChoices.erstesBand || {}).length > 0 || Object.keys(uploadedChoices.zweitesBand || {}).length > 0) {
+      save(choicesKey, uploadedChoices, false); // Don't auto-export choices
+    }
+  }, [uploadedChoices, yearTrimester, hasVisitedWahlTab]);
+  
+  // Persist checked warnings per trimester
+  useEffect(() => {
+    if (!hasVisitedWahlTab.current) return; // Don't save on initial mount
+    
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    const warningsKey = `wv_checkedWarnings_${key}`;
+    save(warningsKey, checkedWarnings, false); // Don't auto-export warnings
+  }, [checkedWarnings, yearTrimester, hasVisitedWahlTab]);
   
   // Check for unsaved changes
   const hasUnsavedChanges = useMemo(() => {
@@ -1466,6 +1667,8 @@ export default function WerkstattVerwaltungApp() {
   const scrollContainerRef = React.useRef(null);
   const topScrollbarRef = React.useRef(null);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+  const [studentSearchQuery, setStudentSearchQuery] = useState(''); // Search query for students in drag & drop
+  const studentCardRefs = React.useRef({}); // Refs for student cards to enable scrolling
 
   // Update window width on resize
   useEffect(() => {
@@ -1726,10 +1929,17 @@ export default function WerkstattVerwaltungApp() {
         setStudents(newStudents);
     setStudentClasses(newStudentClasses);
         setWorkshops(newWorkshops);
-      setUploadedChoices(prev => ({
-        ...prev,
-        [targetBand]: bandMap
-      }));
+      setUploadedChoices(prev => {
+        const updated = {
+          ...prev,
+          [targetBand]: bandMap
+        };
+        // Save choices for current year/trimester
+        const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+        const choicesKey = `wv_choices_${key}`;
+        save(choicesKey, updated, false); // Don't auto-export choices
+        return updated;
+      });
         setUploadSummary(summary);
 
         // Reset file input
@@ -1748,6 +1958,12 @@ export default function WerkstattVerwaltungApp() {
   function runAutoAssign() {
     const res = autoAssignBothBands(students, workshops, prevAssignments, prereqs, JSON.parse(JSON.stringify(uploadedChoices)), studentAssistants, studentPriorityScores, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, cannotBeParallel);
     setAutoResult(res);
+    
+    // Save autoResult for this year/trimester
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    const autoResultKey = `wv_autoResult_${key}`;
+    save(autoResultKey, res, false);
+    
     // populate dragAssignments for interactive editing for both Bands
     // Include ALL students, even if they didn't vote
     const erstesBandDA = {};
@@ -1759,6 +1975,16 @@ export default function WerkstattVerwaltungApp() {
     }
     
     setDragAssignments({ erstesBand: erstesBandDA, zweitesBand: zweitesBandDA });
+  }
+  
+  // Helper function to format year/trimester in natural language
+  function formatYearTrimester(schoolYearStart, schoolYearEnd, trimester) {
+    const trimesterNames = {
+      1: 'Erstes Trimester',
+      2: 'Zweites Trimester',
+      3: 'Drittes Trimester'
+    };
+    return `Schuljahr ${schoolYearStart}/${schoolYearEnd}, ${trimesterNames[trimester]}`;
   }
 
   function saveConfirmedAssignments() {
@@ -1812,18 +2038,17 @@ export default function WerkstattVerwaltungApp() {
           let bandChange = 0;
           
           if (gotFirstChoice) {
-            // Got first choice: -1 point (they're very happy, reduce priority significantly so others get chances first)
+            // Got first choice: -1 point (they're happy, reduce priority so others get chances first)
             bandChange = -1;
           } else if (gotSecondChoice) {
-            // Got second choice: -0.5 points (they're somewhat happy, reduce priority slightly)
-            bandChange = -0.5;
+            // Got second choice: -0.5 points (rounded to -1 for simplicity)
+            bandChange = -1;
           } else {
-            // Didn't get any choice: +1 point (they're unhappy, increase priority significantly for next time)
+            // Didn't get any choice: +1 point for not getting first choice
             bandChange = 1;
-            // If they had a second choice and also didn't get it: +0.25 additional points (total +1.25)
-            // This is worse because they had a backup option and still got nothing
+            // If they had a second choice and also didn't get it: +0.5 additional points (total +1.5)
             if (studentChoices.length >= 2) {
-              bandChange = 1.25;
+              bandChange = 1.5;
             }
           }
           
@@ -1848,11 +2073,203 @@ export default function WerkstattVerwaltungApp() {
     setStudentPriorityScores(updatedScores);
   }
 
-  // Update individual student priority score
-  function updateStudentPriorityScore(student, score) {
-    const clampedScore = Math.max(1, Math.min(10, score));
-    setStudentPriorityScores(prev => ({ ...prev, [student]: clampedScore }));
+  // Calculate priority score history over time for a student
+  function calculatePriorityScoreHistory(student) {
+    // If student has Lernbegleitung, return array of 10s
+    if (studentAssistants[student]) {
+      const historyEntries = [];
+      Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
+        if (payload.timestamp) {
+          historyEntries.push({ slotKey, timestamp: payload.timestamp });
+        }
+      });
+      historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+      return historyEntries.map(() => ({ score: 10, timestamp: '' }));
+    }
+    
+    const lastChanged = studentPriorityScoresLastChanged[student];
+    let startScore = lastChanged && studentPriorityScores[student] !== undefined 
+      ? studentPriorityScores[student] 
+      : 5;
+    
+    // Get all confirmed assignments sorted by timestamp
+    const historyEntries = [];
+    Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
+      if (payload.timestamp) {
+        if (!lastChanged || payload.timestamp >= lastChanged) {
+          if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
+            historyEntries.push({
+              slotKey,
+              erstesBand: payload.assignments.erstesBand?.[student],
+              zweitesBand: payload.assignments.zweitesBand?.[student],
+              timestamp: payload.timestamp
+            });
+          } else {
+            historyEntries.push({
+              slotKey,
+              erstesBand: payload.assignments?.[student],
+              zweitesBand: undefined,
+              timestamp: payload.timestamp
+            });
+          }
+        }
+      }
+    });
+    
+    historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    
+    const scoreHistory = [];
+    let currentScore = startScore;
+    
+    historyEntries.forEach(entry => {
+      const choicesKey = `wv_choices_${entry.slotKey}`;
+      const trimesterChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
+      const erstesBandChoices = (trimesterChoices.erstesBand && trimesterChoices.erstesBand[student]) ? trimesterChoices.erstesBand[student] : [];
+      const zweitesBandChoices = (trimesterChoices.zweitesBand && trimesterChoices.zweitesBand[student]) ? trimesterChoices.zweitesBand[student] : [];
+      
+      let totalChange = 0;
+      let bandsProcessed = 0;
+      
+      if (entry.erstesBand && erstesBandChoices.length > 0 && entry.erstesBand !== 'Nicht Zugeordnet' && entry.erstesBand !== 'Nicht Zugeordnen') {
+        const gotFirstChoice = entry.erstesBand === erstesBandChoices[0];
+        const gotSecondChoice = entry.erstesBand === erstesBandChoices[1];
+        if (gotFirstChoice) {
+          totalChange -= 1;
+        } else if (gotSecondChoice) {
+          totalChange -= 1;
+        } else {
+          totalChange += erstesBandChoices.length >= 2 ? 1.5 : 1;
+        }
+        bandsProcessed++;
+      }
+      
+      if (entry.zweitesBand && zweitesBandChoices.length > 0 && entry.zweitesBand !== 'Nicht Zugeordnet' && entry.zweitesBand !== 'Nicht Zugeordnen') {
+        const gotFirstChoice = entry.zweitesBand === zweitesBandChoices[0];
+        const gotSecondChoice = entry.zweitesBand === zweitesBandChoices[1];
+        if (gotFirstChoice) {
+          totalChange -= 1;
+        } else if (gotSecondChoice) {
+          totalChange -= 1;
+        } else {
+          totalChange += zweitesBandChoices.length >= 2 ? 1.5 : 1;
+        }
+        bandsProcessed++;
+      }
+      
+      if (bandsProcessed > 0) {
+        const averageChange = totalChange / bandsProcessed;
+        currentScore += averageChange;
+        currentScore = Math.max(1, Math.min(10, currentScore));
+      }
+      
+      scoreHistory.push({ score: currentScore, timestamp: entry.timestamp });
+    });
+    
+    return scoreHistory;
   }
+  
+  // Calculate priority score dynamically based on history
+  function calculatePriorityScoreFromHistory(student) {
+    // If student has Lernbegleitung, always return 10
+    if (studentAssistants[student]) {
+      return 10;
+    }
+    
+    // Get the last manual change timestamp
+    const lastChanged = studentPriorityScoresLastChanged[student];
+    
+    // Determine starting score
+    let currentScore;
+    if (lastChanged && studentPriorityScores[student] !== undefined) {
+      // If there was a manual change, start from that manually set score
+      currentScore = studentPriorityScores[student];
+    } else {
+      // Otherwise, start from 5 (default) and process all history
+      currentScore = 5;
+    }
+    
+    // Get all confirmed assignments sorted by timestamp
+    const historyEntries = [];
+    Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
+      if (payload.timestamp) {
+        // If there was a manual change, only process entries after that change
+        // Otherwise, process all entries
+        if (!lastChanged || payload.timestamp >= lastChanged) {
+          // Check if this is a multi-Band assignment
+          if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
+            historyEntries.push({
+              slotKey,
+              erstesBand: payload.assignments.erstesBand?.[student],
+              zweitesBand: payload.assignments.zweitesBand?.[student],
+              timestamp: payload.timestamp
+            });
+          } else {
+            // Legacy single assignment format
+            historyEntries.push({
+              slotKey,
+              erstesBand: payload.assignments?.[student],
+              zweitesBand: undefined,
+              timestamp: payload.timestamp
+            });
+          }
+        }
+      }
+    });
+    
+    // Sort by timestamp (oldest first)
+    historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    
+    // Process each history entry
+    historyEntries.forEach(entry => {
+      // Get choices for this specific trimester (using slotKey to find the choices)
+      const choicesKey = `wv_choices_${entry.slotKey}`;
+      const trimesterChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
+      const erstesBandChoices = (trimesterChoices.erstesBand && trimesterChoices.erstesBand[student]) ? trimesterChoices.erstesBand[student] : [];
+      const zweitesBandChoices = (trimesterChoices.zweitesBand && trimesterChoices.zweitesBand[student]) ? trimesterChoices.zweitesBand[student] : [];
+      
+      let totalChange = 0;
+      let bandsProcessed = 0;
+      
+      // Process erstesBand
+      if (entry.erstesBand && erstesBandChoices.length > 0 && entry.erstesBand !== 'Nicht Zugeordnet' && entry.erstesBand !== 'Nicht Zugeordnen') {
+        const gotFirstChoice = entry.erstesBand === erstesBandChoices[0];
+        const gotSecondChoice = entry.erstesBand === erstesBandChoices[1];
+        
+        if (gotFirstChoice) {
+          totalChange -= 1;
+        } else if (gotSecondChoice) {
+          totalChange -= 1;
+        } else {
+          totalChange += erstesBandChoices.length >= 2 ? 1.5 : 1;
+        }
+        bandsProcessed++;
+      }
+      
+      // Process zweitesBand
+      if (entry.zweitesBand && zweitesBandChoices.length > 0 && entry.zweitesBand !== 'Nicht Zugeordnet' && entry.zweitesBand !== 'Nicht Zugeordnen') {
+        const gotFirstChoice = entry.zweitesBand === zweitesBandChoices[0];
+        const gotSecondChoice = entry.zweitesBand === zweitesBandChoices[1];
+        
+        if (gotFirstChoice) {
+          totalChange -= 1;
+        } else if (gotSecondChoice) {
+          totalChange -= 1;
+        } else {
+          totalChange += zweitesBandChoices.length >= 2 ? 1.5 : 1;
+        }
+        bandsProcessed++;
+      }
+      
+      if (bandsProcessed > 0) {
+        const averageChange = totalChange / bandsProcessed;
+        currentScore += averageChange;
+        currentScore = Math.max(1, Math.min(10, currentScore));
+      }
+    });
+    
+    return Math.round(currentScore * 10) / 10; // Round to 1 decimal place
+  }
+  
 
   // NEW: update a past (confirmed) assignment for one student (inline history edit)
   function updateConfirmedAssignmentForStudent(slotKey, student, newWorkshop, band = null) {
@@ -1881,6 +2298,359 @@ export default function WerkstattVerwaltungApp() {
     setConfirmedAssignments(copy);
   }
 
+  // Excel Report generation functions - generates one Excel file with all classes (multiple sheets)
+  function generateExcelAllClassesReport() {
+    const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
+    const assignmentData = confirmedAssignments[key];
+    
+    if (!assignmentData || !assignmentData.assignments) {
+      alert(`Keine Daten für ${key} gefunden.`);
+      return;
+    }
+    
+    const assignments = assignmentData.assignments;
+    
+    // Create new workbook
+    const wb = XLSX.utils.book_new();
+    
+    // Group students by class
+    const studentsByClass = {};
+    students.forEach(student => {
+      const className = studentClasses[student] || 'Unbekannt';
+      if (!studentsByClass[className]) {
+        studentsByClass[className] = [];
+      }
+      studentsByClass[className].push(student);
+    });
+    
+    // Sort classes
+    const sortedClasses = Object.keys(studentsByClass).sort();
+    
+    // Generate sheet for each class
+    sortedClasses.forEach((className) => {
+      const classStudents = studentsByClass[className].sort((a, b) => a.localeCompare(b));
+      
+      // Prepare table data with title rows first
+      const tableData = [
+        [`Klasse: ${className}`],
+        [`${reportYearTrimester.schoolYearStart}-${reportYearTrimester.schoolYearEnd} - Trimester ${reportYearTrimester.trimester}`],
+        [`Erstellt am: ${new Date().toLocaleDateString('de-DE')}`],
+        [], // Empty row
+        ['Schüler', 'Band', 'Werkstatt', 'Raum', 'Lehrer'] // Header row
+      ];
+      
+      classStudents.forEach(student => {
+        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
+        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
+        
+        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
+        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
+        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
+        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
+        
+        // First row: Erstes Band
+        tableData.push([student, '1. Band', erstesBand, erstesBandRoom, erstesBandTeacher]);
+        
+        // Second row: Zweites Band (empty student name for visual grouping)
+        tableData.push(['', '2. Band', zweitesBand, zweitesBandRoom, zweitesBandTeacher]);
+      });
+      
+      // Create worksheet
+      const ws = XLSX.utils.aoa_to_sheet(tableData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Schüler
+        { wch: 12 }, // Band
+        { wch: 30 }, // Werkstatt
+        { wch: 12 }, // Raum
+        { wch: 20 }  // Lehrer
+      ];
+      
+      // Add worksheet to workbook (sheet name must be <= 31 chars and cannot contain : \ / ? * [ ])
+      const safeSheetName = className
+        .replace(/[:\\\/\?\*\[\]]/g, '_')
+        .substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
+    });
+    
+    // Save Excel file
+    const filename = `Klassen-Berichte_Alle_${key}.xlsx`;
+    XLSX.writeFile(wb, filename);
+  }
+  
+  // Excel Report generation functions - generates one Excel file per class
+  function generateExcelClassReports() {
+    const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
+    const assignmentData = confirmedAssignments[key];
+    
+    if (!assignmentData || !assignmentData.assignments) {
+      alert(`Keine Daten für ${key} gefunden.`);
+      return;
+    }
+    
+    const assignments = assignmentData.assignments;
+    
+    // Group students by class
+    const studentsByClass = {};
+    students.forEach(student => {
+      const className = studentClasses[student] || 'Unbekannt';
+      if (!studentsByClass[className]) {
+        studentsByClass[className] = [];
+      }
+      studentsByClass[className].push(student);
+    });
+    
+    // Sort classes
+    const sortedClasses = Object.keys(studentsByClass).sort();
+    
+    // Generate one Excel file per class
+    sortedClasses.forEach((className) => {
+      const wb = XLSX.utils.book_new();
+      const classStudents = studentsByClass[className].sort((a, b) => a.localeCompare(b));
+      
+      // Prepare table data with title rows first
+      const tableData = [
+        [`Klasse: ${className}`],
+        [`${reportYearTrimester.schoolYearStart}-${reportYearTrimester.schoolYearEnd} - Trimester ${reportYearTrimester.trimester}`],
+        [`Erstellt am: ${new Date().toLocaleDateString('de-DE')}`],
+        [], // Empty row
+        ['Schüler', 'Band', 'Werkstatt', 'Raum', 'Lehrer'] // Header row
+      ];
+      
+      classStudents.forEach(student => {
+        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
+        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
+        
+        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
+        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
+        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
+        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
+        
+        // First row: Erstes Band
+        tableData.push([student, '1. Band', erstesBand, erstesBandRoom, erstesBandTeacher]);
+        
+        // Second row: Zweites Band
+        tableData.push(['', '2. Band', zweitesBand, zweitesBandRoom, zweitesBandTeacher]);
+      });
+      
+      // Create worksheet
+      const ws = XLSX.utils.aoa_to_sheet(tableData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Schüler
+        { wch: 12 }, // Band
+        { wch: 30 }, // Werkstatt
+        { wch: 12 }, // Raum
+        { wch: 20 }  // Lehrer
+      ];
+      
+      XLSX.utils.book_append_sheet(wb, ws, 'Klasse');
+      
+      // Save Excel file
+      const safeClassName = className.replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `Klasse_${safeClassName}_${key}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    });
+  }
+  
+  // Excel Report generation functions - generates one Excel file with all workshops (multiple sheets)
+  function generateExcelAllWorkshopsReport() {
+    const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
+    const assignmentData = confirmedAssignments[key];
+    
+    if (!assignmentData || !assignmentData.assignments) {
+      alert(`Keine Daten für ${key} gefunden.`);
+      return;
+    }
+    
+    const assignments = assignmentData.assignments;
+    
+    // Create new workbook
+    const wb = XLSX.utils.book_new();
+    
+    // Sort workshops alphabetically
+    const sortedWorkshops = Object.keys(workshops).sort();
+    
+    // Generate sheet for each workshop
+    sortedWorkshops.forEach((workshopName) => {
+      const capacity = getWorkshopCapacity(workshops[workshopName], workshopName);
+      const teacher = workshopTeachers[workshopName] || 'Nicht zugeordnet';
+      const room = workshopRooms[workshopName] || 'Nicht zugeordnet';
+      
+      // Get students for this workshop
+      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
+        .filter(([_, assignment]) => assignment === workshopName)
+        .map(([student, _]) => student)
+        .sort((a, b) => a.localeCompare(b));
+      
+      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
+        .filter(([_, assignment]) => assignment === workshopName)
+        .map(([student, _]) => student)
+        .sort((a, b) => a.localeCompare(b));
+      
+      // Prepare data
+      const tableData = [];
+      
+      // Add header rows
+      tableData.push([workshopName]);
+      tableData.push([`Lehrkraft: ${teacher}`]);
+      tableData.push([`Raum: ${room}`]);
+      tableData.push([`Kapazität: ${capacity} Plätze`]);
+      tableData.push([]);
+      
+      // Erstes Band
+      if (erstesBandStudents.length > 0) {
+        tableData.push(['Erstes Band:']);
+        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
+        
+        erstesBandStudents.forEach(student => {
+          const className = studentClasses[student] || 'Unbekannt';
+          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
+          const comment = studentComments[student] || '';
+          tableData.push([student, className, comment, needsAssistant]);
+        });
+        tableData.push([]);
+      }
+      
+      // Zweites Band
+      if (zweitesBandStudents.length > 0) {
+        tableData.push(['Zweites Band:']);
+        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
+        
+        zweitesBandStudents.forEach(student => {
+          const className = studentClasses[student] || 'Unbekannt';
+          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
+          const comment = studentComments[student] || '';
+          tableData.push([student, className, comment, needsAssistant]);
+        });
+      }
+      
+      if (erstesBandStudents.length === 0 && zweitesBandStudents.length === 0) {
+        tableData.push(['Keine Schüler zugeordnet']);
+      }
+      
+      // Create worksheet
+      const ws = XLSX.utils.aoa_to_sheet(tableData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Schüler
+        { wch: 15 }, // Klasse
+        { wch: 40 }, // Bemerkung
+        { wch: 15 }  // Lernbegleitung
+      ];
+      
+      // Add worksheet to workbook (sheet name must be <= 31 chars and cannot contain : \ / ? * [ ])
+      const safeSheetName = workshopName
+        .replace(/[:\\\/\?\*\[\]]/g, '_')
+        .substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
+    });
+    
+    // Save Excel file
+    const filename = `Werkstatt-Uebersicht_Alle_${key}.xlsx`;
+    XLSX.writeFile(wb, filename);
+  }
+  
+  // Excel Report generation functions - generates one Excel file per workshop
+  function generateExcelWorkshopReports() {
+    const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
+    const assignmentData = confirmedAssignments[key];
+    
+    if (!assignmentData || !assignmentData.assignments) {
+      alert(`Keine Daten für ${key} gefunden.`);
+      return;
+    }
+    
+    const assignments = assignmentData.assignments;
+    
+    // Sort workshops alphabetically
+    const sortedWorkshops = Object.keys(workshops).sort();
+    
+    // Generate one Excel file per workshop
+    sortedWorkshops.forEach((workshopName) => {
+      const wb = XLSX.utils.book_new();
+      const capacity = getWorkshopCapacity(workshops[workshopName], workshopName);
+      const teacher = workshopTeachers[workshopName] || 'Nicht zugeordnet';
+      const room = workshopRooms[workshopName] || 'Nicht zugeordnet';
+      
+      // Get students for this workshop
+      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
+        .filter(([_, assignment]) => assignment === workshopName)
+        .map(([student, _]) => student)
+        .sort((a, b) => a.localeCompare(b));
+      
+      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
+        .filter(([_, assignment]) => assignment === workshopName)
+        .map(([student, _]) => student)
+        .sort((a, b) => a.localeCompare(b));
+      
+      // Prepare data
+      const tableData = [];
+      
+      // Add header rows
+      tableData.push([workshopName]);
+      tableData.push([`${reportYearTrimester.schoolYearStart}-${reportYearTrimester.schoolYearEnd} - Trimester ${reportYearTrimester.trimester}`]);
+      tableData.push([`Erstellt am: ${new Date().toLocaleDateString('de-DE')}`]);
+      tableData.push([]);
+      tableData.push([`Lehrkraft: ${teacher}`]);
+      tableData.push([`Raum: ${room}`]);
+      tableData.push([`Kapazität: ${capacity} Plätze`]);
+      tableData.push([]);
+      
+      // Erstes Band
+      if (erstesBandStudents.length > 0) {
+        tableData.push(['Erstes Band:']);
+        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
+        
+        erstesBandStudents.forEach(student => {
+          const className = studentClasses[student] || 'Unbekannt';
+          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
+          const comment = studentComments[student] || '';
+          tableData.push([student, className, comment, needsAssistant]);
+        });
+        tableData.push([]);
+      }
+      
+      // Zweites Band
+      if (zweitesBandStudents.length > 0) {
+        tableData.push(['Zweites Band:']);
+        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
+        
+        zweitesBandStudents.forEach(student => {
+          const className = studentClasses[student] || 'Unbekannt';
+          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
+          const comment = studentComments[student] || '';
+          tableData.push([student, className, comment, needsAssistant]);
+        });
+      }
+      
+      if (erstesBandStudents.length === 0 && zweitesBandStudents.length === 0) {
+        tableData.push(['Keine Schüler zugeordnet']);
+      }
+      
+      // Create worksheet
+      const ws = XLSX.utils.aoa_to_sheet(tableData);
+      
+      // Set column widths
+      ws['!cols'] = [
+        { wch: 25 }, // Schüler
+        { wch: 15 }, // Klasse
+        { wch: 40 }, // Bemerkung
+        { wch: 15 }  // Lernbegleitung
+      ];
+      
+      XLSX.utils.book_append_sheet(wb, ws, 'Werkstatt');
+      
+      // Save Excel file
+      const safeWorkshopName = workshopName.replace(/[^a-zA-Z0-9]/g, '_');
+      const filename = `Werkstatt_${safeWorkshopName}_${key}.xlsx`;
+      XLSX.writeFile(wb, filename);
+    });
+  }
+  
   // PDF Report generation functions - generates one PDF with all classes
   function generatePDFAllClassesReport() {
     const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
@@ -2521,6 +3291,7 @@ export default function WerkstattVerwaltungApp() {
         [LS_KEYS.studentAssistants]: studentAssistants,
         [LS_KEYS.studentClasses]: studentClasses,
         [LS_KEYS.studentPriorityScores]: studentPriorityScores,
+        [LS_KEYS.studentPriorityScoresLastChanged]: studentPriorityScoresLastChanged,
         [LS_KEYS.workshopColors]: workshopColors,
         [LS_KEYS.studentComments]: studentComments,
         [LS_KEYS.workshopTeachers]: workshopTeachers,
@@ -2564,6 +3335,10 @@ export default function WerkstattVerwaltungApp() {
       if (importedData[LS_KEYS.studentAssistants]) setStudentAssistants(importedData[LS_KEYS.studentAssistants]);
       if (importedData[LS_KEYS.studentClasses]) setStudentClasses(importedData[LS_KEYS.studentClasses]);
       if (importedData[LS_KEYS.studentPriorityScores]) setStudentPriorityScores(importedData[LS_KEYS.studentPriorityScores]);
+      // Import studentPriorityScoresLastChanged if present (backward compatible - skip if not present)
+      if (importedData[LS_KEYS.studentPriorityScoresLastChanged]) {
+        setStudentPriorityScoresLastChanged(importedData[LS_KEYS.studentPriorityScoresLastChanged]);
+      }
       if (importedData[LS_KEYS.workshopColors]) setWorkshopColors(importedData[LS_KEYS.workshopColors]);
       if (importedData[LS_KEYS.studentComments]) setStudentComments(importedData[LS_KEYS.studentComments]);
       if (importedData[LS_KEYS.workshopTeachers]) setWorkshopTeachers(importedData[LS_KEYS.workshopTeachers]);
@@ -2792,10 +3567,7 @@ export default function WerkstattVerwaltungApp() {
     const previousAssignment = getAssignmentsForBand(activeBand)[student];
     
     // Always perform assignment, even if rules are broken
-    setDragAssignments(prev => ({ 
-      ...prev, 
-      [activeBand]: { ...prev[activeBand], [student]: workshopName }
-    }));
+    // (State update is now handled at the end of the function with auto-save)
     
     // Clear violations from previous workshop
     if (previousAssignment && previousAssignment !== workshopName) {
@@ -2896,7 +3668,7 @@ export default function WerkstattVerwaltungApp() {
               ...prev,
               [workshopName]: {
                 ...(prev[workshopName] || {}),
-                [student]: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${getPreviousTrimesterKey(yearTrimester.year, yearTrimester.trimester)} einen Kurs belegt, der diese Regel auslöst).`
+                  [student]: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)} einen Kurs belegt, der diese Regel auslöst).`
               }
             }));
           } else if (requiredFolgekurs.course === workshopName) {
@@ -2962,6 +3734,36 @@ export default function WerkstattVerwaltungApp() {
     }
     
     setDragHover({ workshop: null, invalid: false, message: null });
+    
+    // Update state and auto-save the assignment in the background
+    setDragAssignments(prev => {
+      const updatedAssignments = {
+        ...prev,
+        [activeBand]: { ...prev[activeBand], [student]: workshopName }
+      };
+      
+      // Auto-save after state update
+      setTimeout(() => {
+        const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+        const payload = load(LS_KEYS.assignments, {});
+        payload[key] = { 
+          assignments: updatedAssignments, 
+          timestamp: new Date().toISOString(),
+          bands: ['erstesBand', 'zweitesBand']
+        };
+        save(LS_KEYS.assignments, payload);
+        setConfirmedAssignments(payload);
+        
+        // Export to CSV by school year/trimester
+        exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatedAssignments);
+        
+        // Update priority scores based on assignment results
+        updatePriorityScores(updatedAssignments, uploadedChoices);
+      }, 100);
+      
+      // Return updated state
+      return updatedAssignments;
+    });
   }
 
   function finalizeAndOverwriteConfirm() {
@@ -3450,8 +4252,15 @@ export default function WerkstattVerwaltungApp() {
   }
 
   // Helper to get assignments for a specific Band
+  // Returns assignments for all students - unassigned students will have undefined/null assignment
   function getAssignmentsForBand(band) {
-    return dragAssignments[band] || {};
+    const assignments = dragAssignments[band] || {};
+    // Ensure all students are included, even if they don't have an assignment yet
+    const allAssignments = {};
+    students.forEach(student => {
+      allAssignments[student] = assignments[student];
+    });
+    return allAssignments;
   }
 
   // Check for students assigned to same workshop in both bands
@@ -3485,6 +4294,11 @@ export default function WerkstattVerwaltungApp() {
   function hasNoVotesForBand(student, band) {
     const choices = getChoicesForBand(band)[student];
     return !choices || choices.length === 0;
+  }
+
+  // Get all students without votes for the active band
+  function getStudentsWithoutVotes() {
+    return students.filter(s => hasNoVotesForBand(s, activeBand));
   }
 
   // Check for students with same first choice in both bands
@@ -3550,14 +4364,6 @@ export default function WerkstattVerwaltungApp() {
   return (
     <div className="app-container">
       {/* Unsaved Changes Warning */}
-      {hasUnsavedChanges && (
-        <div className="w-full bg-gray-100 border-b border-gray-300 py-2 px-6">
-          <div className="max-w-7xl mx-auto text-sm text-gray-600">
-            ⚠️ Ungespeicherte Änderungen vorhanden. Bitte speichern Sie die Zuweisungen im Tab "Wahl & Zuordnung".
-          </div>
-        </div>
-      )}
-      
       <header className="app-header">
         <h1 className="app-title">Werkstatt-Verwaltung</h1>
         <nav className="nav-buttons">
@@ -3570,7 +4376,13 @@ export default function WerkstattVerwaltungApp() {
             tab==='wahl' 
               ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
               : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-          }`} onClick={()=>setTab('wahl')}>Wahl & Zuordnung</button>
+          }`} onClick={() => {
+            setTab('wahl');
+            if (!hasVisitedWahlTab.current) {
+              hasVisitedWahlTab.current = true;
+              setShowTrimesterDialog(true);
+            }
+          }}>Wahl & Zuordnung</button>
           <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
             tab==='reports' 
               ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
@@ -3593,6 +4405,141 @@ export default function WerkstattVerwaltungApp() {
           }`} onClick={()=>setTab('data')}>Daten</button>
         </nav>
       </header>
+
+      {/* Trimester Selection Dialogs - Outside tabs so they always render */}
+      {/* Dialog for Wahl Tab */}
+      <Dialog open={showTrimesterDialog} onOpenChange={(open) => {
+        setShowTrimesterDialog(open);
+        if (open) {
+          setDialogYearTrimester(yearTrimester);
+        }
+      }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Trimester auswählen</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Schuljahr:</label>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="number" 
+                  value={dialogYearTrimester.schoolYearStart} 
+                  onChange={(e) => {
+                    const start = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearStart;
+                    setDialogYearTrimester({ schoolYearStart: start, schoolYearEnd: start + 1, trimester: dialogYearTrimester.trimester });
+                  }}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  min="2020"
+                  max="2100"
+                />
+                <span className="text-gray-500">/</span>
+                <div className="flex-1 px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-600">
+                  {dialogYearTrimester.schoolYearEnd}
+                </div>
+              </div>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Trimester:</label>
+              <select 
+                value={dialogYearTrimester.trimester} 
+                onChange={(e) => setDialogYearTrimester(prev => ({ ...prev, trimester: parseInt(e.target.value) }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              >
+                <option value={1}>1. Trimester</option>
+                <option value={2}>2. Trimester</option>
+                <option value={3}>3. Trimester</option>
+              </select>
+            </div>
+            
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowTrimesterDialog(false)}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={() => {
+                  setYearTrimester(dialogYearTrimester);
+                  setShowTrimesterDialog(false);
+                }}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
+              >
+                Bestätigen
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+      
+      {/* Dialog for Reports Tab */}
+      <Dialog open={showReportsTrimesterDialog} onOpenChange={(open) => {
+        setShowReportsTrimesterDialog(open);
+        if (open) {
+          setDialogYearTrimester(reportYearTrimester);
+        }
+      }}>
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle>Trimester auswählen</DialogTitle>
+          </DialogHeader>
+          <div className="space-y-4 py-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Schuljahr:</label>
+              <div className="flex items-center gap-2">
+                <input 
+                  type="number" 
+                  value={dialogYearTrimester.schoolYearStart} 
+                  onChange={(e) => {
+                    const start = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearStart;
+                    setDialogYearTrimester({ schoolYearStart: start, schoolYearEnd: start + 1, trimester: dialogYearTrimester.trimester });
+                  }}
+                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+                  min="2020"
+                  max="2100"
+                />
+                <span className="text-gray-500">/</span>
+                <div className="flex-1 px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-600">
+                  {dialogYearTrimester.schoolYearEnd}
+                </div>
+              </div>
+            </div>
+            
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">Trimester:</label>
+              <select 
+                value={dialogYearTrimester.trimester} 
+                onChange={(e) => setDialogYearTrimester(prev => ({ ...prev, trimester: parseInt(e.target.value) }))}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+              >
+                <option value={1}>1. Trimester</option>
+                <option value={2}>2. Trimester</option>
+                <option value={3}>3. Trimester</option>
+              </select>
+            </div>
+            
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                onClick={() => setShowReportsTrimesterDialog(false)}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={() => {
+                  setReportYearTrimester(dialogYearTrimester);
+                  setShowReportsTrimesterDialog(false);
+                }}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
+              >
+                Bestätigen
+              </button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
 
       {tab === 'students' && (
         <section className="section">
@@ -3773,26 +4720,65 @@ export default function WerkstattVerwaltungApp() {
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                           </svg>
                           <div className="absolute left-1/2 bottom-full mb-2 transform -translate-x-1/2 w-80 bg-gray-900 text-white text-xs rounded-lg py-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50">
-                            Prioritätspunktzahl (1-10): Bestimmt die Reihenfolge bei der Zuweisung. HÖHERE Punktzahlen = höhere Priorität (werden zuerst zugewiesen). Die Punktzahl wird automatisch angepasst: Pro Band - Erste Wahl erhalten: -1 Punkt, Zweite Wahl erhalten: -0.5 Punkte, Keine Wahl erhalten: +1 Punkt, Auch zweite Wahl nicht erhalten: +1.25 Punkte. Beide Bänder werden gemittelt. Schüler mit Lernbegleitung haben immer höchste Priorität.
+                            Prioritätspunktzahl (1-10): Bestimmt die Reihenfolge bei der Zuweisung. HÖHERE Punktzahlen = höhere Priorität (werden zuerst zugewiesen). Die Punktzahl wird automatisch basierend auf der Historie berechnet: Pro Band - Erste Wahl erhalten: -1 Punkt, Zweite Wahl erhalten: -1 Punkt, Keine Wahl erhalten: +1 Punkt, Auch zweite Wahl nicht erhalten: +1.5 Punkte. Beide Bänder werden gemittelt. Schüler mit Lernbegleitung haben immer höchste Priorität (10).
                           </div>
                         </div>
                       </div>
                       <div className="detail-content">
                         <div className="flex items-center space-x-3">
-                          <input 
-                            type="number" 
-                            min="1" 
-                            max="10" 
-                            value={studentPriorityScores[selectedStudent] || 5} 
-                            onChange={(e) => updateStudentPriorityScore(selectedStudent, parseInt(e.target.value) || 5)}
-                            className="w-24 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 text-lg font-semibold"
-                          />
+                          <div className="w-24 px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-lg font-semibold text-gray-700">
+                            {(() => {
+                              // Calculate dynamically based on history
+                              const calculatedScore = calculatePriorityScoreFromHistory(selectedStudent);
+                              return calculatedScore.toFixed(1);
+                            })()}
+                          </div>
                           <span className="text-sm text-gray-600">/ 10</span>
                           <span className="text-xs text-gray-500 italic">
-                            {studentPriorityScores[selectedStudent] >= 8 ? 'Hoch' : 
-                             studentPriorityScores[selectedStudent] >= 5 ? 'Mittel' : 
-                             'Niedrig'}
+                            {(() => {
+                              const score = calculatePriorityScoreFromHistory(selectedStudent);
+                              return score >= 8 ? 'Hoch' : score >= 5 ? 'Mittel' : 'Niedrig';
+                            })()}
                           </span>
+                          {(() => {
+                            const scoreHistory = calculatePriorityScoreHistory(selectedStudent);
+                            if (scoreHistory.length >= 2) {
+                              const width = 60;
+                              const height = 20;
+                              const padding = 2;
+                              const graphWidth = width - padding * 2;
+                              const graphHeight = height - padding * 2;
+                              
+                              // Find min and max scores for scaling
+                              const scores = scoreHistory.map(h => h.score);
+                              const minScore = Math.min(...scores);
+                              const maxScore = Math.max(...scores);
+                              const scoreRange = maxScore - minScore || 1; // Avoid division by zero
+                              
+                              // Generate path points
+                              const points = scoreHistory.map((point, index) => {
+                                const x = padding + (index / (scoreHistory.length - 1)) * graphWidth;
+                                const y = padding + graphHeight - ((point.score - minScore) / scoreRange) * graphHeight;
+                                return `${x},${y}`;
+                              });
+                              
+                              const pathData = `M ${points.join(' L ')}`;
+                              
+                              return (
+                                <svg width={width} height={height} className="flex-shrink-0" style={{ minWidth: width }}>
+                                  <path
+                                    d={pathData}
+                                    fill="none"
+                                    stroke="#3b82f6"
+                                    strokeWidth="1.5"
+                                    strokeLinecap="round"
+                                    strokeLinejoin="round"
+                                  />
+                                </svg>
+                              );
+                            }
+                            return null;
+                          })()}
                         </div>
                       </div>
                     </div>
@@ -4066,49 +5052,31 @@ export default function WerkstattVerwaltungApp() {
         </button>
       </div>
 
-      {/* --- SCHOOL YEAR/TRIMESTER SELECTION --- */}
-      <div className="bg-gradient-to-br from-indigo-50 to-purple-100 rounded-xl p-4 mb-6 shadow-sm border border-indigo-200">
-        <h3 className="text-lg font-semibold text-indigo-900 mb-3 border-b border-indigo-300 pb-2">Schuljahr & Trimester Auswahl</h3>
-        <div className="flex flex-wrap gap-4 items-center">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Schuljahr Start:</label>
-            <input 
-              type="number" 
-              value={yearTrimester.schoolYearStart} 
-              onChange={(e) => {
-                const start = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearStart;
-                setYearTrimester(prev => ({ ...prev, schoolYearStart: start, schoolYearEnd: start + 1 }));
-              }}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200 w-24"
-            />
+      {/* --- TRIMESTER SELECTION --- */}
+      <div className="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-xl p-5 mb-6 shadow-md border-2 border-indigo-200">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg">
+              <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600 font-medium">Aktuelles Semester</div>
+              <div className="text-lg font-bold text-indigo-900">
+                {formatYearTrimester(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
+              </div>
+            </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Schuljahr Ende:</label>
-            <input 
-              type="number" 
-              value={yearTrimester.schoolYearEnd} 
-              onChange={(e) => {
-                const end = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearEnd;
-                setYearTrimester(prev => ({ ...prev, schoolYearEnd: end, schoolYearStart: end - 1 }));
-              }}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200 w-24"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1">Trimester:</label>
-            <select 
-              value={yearTrimester.trimester} 
-              onChange={(e) => setYearTrimester(prev => ({ ...prev, trimester: parseInt(e.target.value) }))}
-              className="px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200"
-            >
-              <option value={1}>1. Trimester</option>
-              <option value={2}>2. Trimester</option>
-              <option value={3}>3. Trimester</option>
-            </select>
-          </div>
-          <div className="text-sm text-gray-600 bg-white px-3 py-2 rounded-lg border border-gray-200">
-            <strong>Speichern unter:</strong> {getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
-          </div>
+          <button
+            onClick={() => setShowTrimesterDialog(true)}
+            className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md hover:from-indigo-700 hover:to-indigo-800 hover:shadow-lg transition-all duration-200 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            Anderes Trimester wählen
+          </button>
         </div>
       </div>
 
@@ -4290,14 +5258,6 @@ export default function WerkstattVerwaltungApp() {
             </div>
           )}
 
-          <div className="mt-4">
-            <button 
-              onClick={finalizeAndOverwriteConfirm} 
-              className="px-4 py-2 bg-gradient-to-r from-blue-600 to-blue-700 text-white text-sm font-medium rounded-lg shadow-sm hover:from-blue-700 hover:to-blue-800 hover:shadow-md transition-all duration-200"
-            >
-              Beide Bänder speichern ({getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)})
-            </button>
-          </div>
 
           {/* Display statistics - use currentStatistics if available, otherwise autoResult */}
           {(Object.keys(dragAssignments.erstesBand).length > 0 || Object.keys(dragAssignments.zweitesBand).length > 0 || autoResult) && (
@@ -4394,82 +5354,71 @@ export default function WerkstattVerwaltungApp() {
         </div>
       </div>
 
-      {/* --- MID SECTION: Assignment Summary (Übersicht) --- */}
-      {autoResult && (
-        <div className="mt-6 bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200">
-          <h3 className="text-lg font-semibold mb-4 text-green-900 border-b border-green-300 pb-2">
-            Übersicht ({activeBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band)
-          </h3>
-          <div className="max-h-[300px] overflow-y-auto text-sm border-t border-gray-200 pt-2">
-            {students.map((s) => {
-              const ch = getChoicesForBand(activeBand)[s] || [];
-              const assigned = getAssignmentsForBand(activeBand)[s] || 'Nicht Zugeordnet';
-              const gotFirst = assigned === ch[0];
-              const gotSecond = assigned === ch[1];
-              const violations = checkViolationsForStudent(s, ch);
-              const needsAssistant = studentAssistants[s];
-
-              return (
-                <div
-                  key={s}
-                  className={`flex flex-col py-3 px-3 rounded-lg border-b last:border-0 transition-all duration-200 ${
-                    needsAssistant
-                      ? 'bg-gradient-to-r from-blue-50 to-indigo-100 border-l-4 border-blue-400 shadow-sm'
-                      : hasNoVotesForBand(s, activeBand)
-                      ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-l-4 border-yellow-400 shadow-sm'
-                      : gotFirst
-                      ? 'bg-gradient-to-r from-green-50 to-emerald-100 border-green-200 shadow-sm'
-                      : gotSecond
-                      ? 'bg-gradient-to-r from-purple-50 to-violet-100 border-purple-200 shadow-sm'
-                      : assigned !== 'Nicht Zugeordnet'
-                      ? 'bg-gradient-to-r from-yellow-50 to-amber-100 border-yellow-200 shadow-sm'
-                      : 'hover:bg-gray-50'
-                  }`}
-                >
-                  <div className="flex justify-between items-center">
-                    <div className="flex items-center">
-                      <div className="font-medium">{s}</div>
-                      <span className="ml-2 px-2 py-0.5 bg-gray-200 text-gray-700 text-xs font-medium rounded">
-                        {studentClasses[s] || '—'}
-                      </span>
-                      {needsAssistant && (
-                        <span className="ml-2 px-2 py-0.5 bg-blue-200 text-blue-800 text-xs font-semibold rounded-full flex items-center">
-                          <div className="w-2 h-2 bg-blue-600 rounded-full mr-1"></div>
-                          Lernbegleitung
-                        </span>
-                      )}
-                      {hasNoVotesForBand(s, activeBand) && (
-                        <span className="ml-2 px-2 py-0.5 bg-yellow-200 text-yellow-800 text-xs font-semibold rounded-full flex items-center">
-                          <div className="w-2 h-2 bg-yellow-500 rounded-full mr-1"></div>
-                          Keine Wahlen
-                        </span>
-                      )}
-                    </div>
-                    <div className="font-semibold">{assigned}</div>
-                  </div>
-                  {violations.length > 0 && (
-                    <div className="text-xs text-red-600 mt-1">
-                      {violations.map((v, idx) => (
-                        <div key={idx}>{v}</div>
-                      ))}
-                    </div>
-                  )}
-                  <div className="text-xs text-gray-600 mt-2 flex gap-2">
-                    <span className="px-2 py-1 bg-gray-100 rounded-md font-medium">1. {ch[0] || '—'}</span>
-                    <span className="px-2 py-1 bg-gray-100 rounded-md font-medium">2. {ch[1] || '—'}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
       {/* --- BOTTOM SECTION: Drag & Drop Grid --- */}
       <div className="mt-6 bg-gradient-to-br from-purple-50 to-violet-100 rounded-xl p-6 shadow-sm border border-purple-200">
-        <h3 className="text-lg font-semibold mb-4 text-purple-900 border-b border-purple-300 pb-2">
-          Manuelle Anpassung ({activeBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band)
-        </h3>
+        <div className="flex items-center justify-between mb-4 border-b border-purple-300 pb-2">
+          <h3 className="text-lg font-semibold text-purple-900">
+            Manuelle Anpassung ({activeBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band)
+          </h3>
+          {/* Student Search */}
+          <div className="flex items-center gap-2">
+            <div className="relative">
+              <input
+                type="text"
+                value={studentSearchQuery}
+                onChange={(e) => {
+                  const query = e.target.value;
+                  setStudentSearchQuery(query);
+                  
+                  if (query.trim()) {
+                    // Find student matching the query
+                    const matchingStudent = students.find(s => 
+                      s.toLowerCase().includes(query.toLowerCase())
+                    );
+                    
+                    if (matchingStudent) {
+                      // Find which workshop the student is in
+                      const assignment = getAssignmentsForBand(activeBand)[matchingStudent];
+                      const workshopName = assignment && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen' 
+                        ? assignment 
+                        : 'Nicht Zugeordnet';
+                      
+                      // Scroll to the student card
+                      setTimeout(() => {
+                        const studentRef = studentCardRefs.current[`${workshopName}-${matchingStudent}`];
+                        if (studentRef && scrollContainerRef.current) {
+                          // Scroll the container to show the student
+                          const container = scrollContainerRef.current;
+                          const cardRect = studentRef.getBoundingClientRect();
+                          const containerRect = container.getBoundingClientRect();
+                          
+                          // Calculate scroll position to center the card
+                          const scrollLeft = container.scrollLeft + (cardRect.left - containerRect.left) - (containerRect.width / 2) + (cardRect.width / 2);
+                          container.scrollTo({ left: scrollLeft, behavior: 'smooth' });
+                        }
+                      }, 100);
+                    }
+                  }
+                }}
+                placeholder="Schüler suchen..."
+                className="pl-8 pr-8 py-1.5 text-sm border border-purple-300 rounded-lg focus:ring-2 focus:ring-purple-500 focus:border-transparent w-48"
+              />
+              <svg className="absolute left-2 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+              </svg>
+              {studentSearchQuery && (
+                <button
+                  onClick={() => setStudentSearchQuery('')}
+                  className="absolute right-2 top-1/2 transform -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                  </svg>
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
 
         {/* Warning for students with same workshop in both bands */}
         {(() => {
@@ -4684,14 +5633,23 @@ export default function WerkstattVerwaltungApp() {
 
                   <div className="space-y-1 min-h-[80px]">
                     {Object.entries(getAssignmentsForBand(activeBand))
-                      .filter(([s, a]) => a === w)
+                      .filter(([s, a]) => a === w && a !== undefined && a !== null)
                       .map(([s]) => (
                         <div
                           key={s}
+                          ref={(el) => {
+                            if (el) {
+                              studentCardRefs.current[`${w}-${s}`] = el;
+                            } else {
+                              delete studentCardRefs.current[`${w}-${s}`];
+                            }
+                          }}
                           draggable
                           onDragStart={(e) => handleDragStart(e, s)}
                           className={`cursor-move px-3 py-2 rounded-lg text-xs flex justify-between items-start shadow-sm flex-col transition-all duration-200 hover:shadow-md ${
-                            persistentViols[s]
+                            studentSearchQuery && s.toLowerCase().includes(studentSearchQuery.toLowerCase())
+                              ? 'bg-gradient-to-r from-blue-200 to-blue-300 border-2 border-blue-500 shadow-lg ring-2 ring-blue-400'
+                              : persistentViols[s]
                               ? 'bg-gradient-to-r from-red-100 to-orange-100 border border-red-200 hover:from-red-200 hover:to-orange-200'
                               : hasNoVotesForBand(s, activeBand)
                               ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 hover:from-yellow-100 hover:to-amber-100'
@@ -4749,8 +5707,9 @@ export default function WerkstattVerwaltungApp() {
                 e.preventDefault();
                 const student = e.dataTransfer.getData('text/plain');
                 if (!student) return;
-                setDragAssignments((prev) => ({ 
-                  ...prev, 
+                // Update state (auto-save is handled by useEffect)
+                setDragAssignments(prev => ({
+                  ...prev,
                   [activeBand]: { ...prev[activeBand], [student]: 'Nicht Zugeordnen' }
                 }));
                 
@@ -4787,15 +5746,24 @@ export default function WerkstattVerwaltungApp() {
                 {students
                   .filter(s => {
                     const assignment = getAssignmentsForBand(activeBand)[s];
-                    return !assignment || assignment === 'Nicht Zugeordnet' || assignment === 'Nicht Zugeordnen';
+                    return !assignment || assignment === 'Nicht Zugeordnet' || assignment === 'Nicht Zugeordnen' || assignment === undefined || assignment === null;
                   })
                   .map((s) => (
                     <div
                       key={s}
+                      ref={(el) => {
+                        if (el) {
+                          studentCardRefs.current[`Nicht Zugeordnet-${s}`] = el;
+                        } else {
+                          delete studentCardRefs.current[`Nicht Zugeordnet-${s}`];
+                        }
+                      }}
                       draggable
                       onDragStart={(e) => handleDragStart(e, s)}
                       className={`cursor-move px-3 py-2 rounded-lg text-xs shadow-sm flex flex-col transition-all duration-200 hover:shadow-md ${
-                        hasNoVotesForBand(s, activeBand)
+                        studentSearchQuery && s.toLowerCase().includes(studentSearchQuery.toLowerCase())
+                          ? 'bg-gradient-to-r from-blue-200 to-blue-300 border-2 border-blue-500 shadow-lg ring-2 ring-blue-400'
+                          : hasNoVotesForBand(s, activeBand)
                           ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 hover:from-yellow-100 hover:to-amber-100'
                           : 'bg-gradient-to-r from-orange-50 to-red-50 border border-orange-200 hover:from-orange-100 hover:to-red-100'
                       }`}
@@ -4865,48 +5833,30 @@ export default function WerkstattVerwaltungApp() {
       <h2 className="text-2xl font-bold text-gray-800 mb-6 border-b border-gray-300 pb-3">Berichte herunterladen</h2>
       
       {/* School Year/Trimester Selection */}
-      <div className="bg-gradient-to-br from-indigo-50 to-purple-100 rounded-xl p-6 mb-8 shadow-sm border border-indigo-200">
-        <h3 className="text-lg font-semibold text-indigo-900 mb-4 border-b border-indigo-300 pb-2">Schuljahr & Trimester Auswahl</h3>
-        <div className="flex flex-wrap gap-6 items-center">
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Schuljahr Start:</label>
-            <input 
-              type="number" 
-              value={reportYearTrimester.schoolYearStart} 
-              onChange={(e) => {
-                const start = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearStart;
-                setReportYearTrimester(prev => ({ ...prev, schoolYearStart: start, schoolYearEnd: start + 1 }));
-              }}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200 w-32"
-            />
+      <div className="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-xl p-5 mb-8 shadow-md border-2 border-indigo-200">
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex items-center gap-3">
+            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg">
+              <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+              </svg>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600 font-medium">Bericht für</div>
+              <div className="text-lg font-bold text-indigo-900">
+                {formatYearTrimester(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester)}
+              </div>
+            </div>
           </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Schuljahr Ende:</label>
-            <input 
-              type="number" 
-              value={reportYearTrimester.schoolYearEnd} 
-              onChange={(e) => {
-                const end = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearEnd;
-                setReportYearTrimester(prev => ({ ...prev, schoolYearEnd: end, schoolYearStart: end - 1 }));
-              }}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200 w-32"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-gray-700 mb-2">Trimester:</label>
-            <select 
-              value={reportYearTrimester.trimester} 
-              onChange={(e) => setReportYearTrimester(prev => ({ ...prev, trimester: parseInt(e.target.value) }))}
-              className="px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent transition-all duration-200"
-            >
-              <option value={1}>1. Trimester</option>
-              <option value={2}>2. Trimester</option>
-              <option value={3}>3. Trimester</option>
-            </select>
-          </div>
-          <div className="text-sm text-gray-600 bg-white px-4 py-2 rounded-lg border border-gray-200">
-            <strong>Bericht für:</strong> {getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester)}
-          </div>
+          <button
+            onClick={() => setShowReportsTrimesterDialog(true)}
+            className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md hover:from-indigo-700 hover:to-indigo-800 hover:shadow-lg transition-all duration-200 flex items-center gap-2"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+            Anderes Trimester wählen
+          </button>
         </div>
       </div>
 
@@ -4914,9 +5864,9 @@ export default function WerkstattVerwaltungApp() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
         {/* Workshop Overview Report */}
         <div className="bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200">
-          <h3 className="text-lg font-semibold text-green-900 mb-3 border-b border-green-300 pb-2">Werkstatt-Übersicht (PDF)</h3>
+          <h3 className="text-lg font-semibold text-green-900 mb-3 border-b border-green-300 pb-2">Werkstatt-Übersicht</h3>
           <p className="text-sm text-green-700 mb-4">
-            Umfassende PDF-Übersicht aller Werkstätten mit:
+            Umfassende Übersicht aller Werkstätten mit:
           </p>
           <ul className="text-xs text-green-600 mb-4 list-disc list-inside space-y-1">
             <li>Lehrkraft und Raum pro Werkstatt</li>
@@ -4925,26 +5875,42 @@ export default function WerkstattVerwaltungApp() {
             <li>Lernbegleitung-Status</li>
           </ul>
           <div className="space-y-2">
-            <button 
-              onClick={generatePDFAllWorkshopsReport}
-              className="w-full px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white font-semibold rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200"
-            >
-              📊 PDF: Alle Werkstätten (ein Dokument)
-            </button>
-            <button 
-              onClick={generatePDFWorkshopReports}
-              className="w-full px-6 py-3 bg-gradient-to-r from-green-400 to-green-500 text-white font-semibold rounded-lg shadow-sm hover:from-green-500 hover:to-green-600 hover:shadow-md transition-all duration-200"
-            >
-              📊 PDF: Einzelne Werkstätten (mehrere Dokumente)
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={generatePDFAllWorkshopsReport}
+                className="px-4 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white font-semibold rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📊 PDF: Alle Werkstätten
+              </button>
+              <button 
+                onClick={generateExcelAllWorkshopsReport}
+                className="px-4 py-3 bg-gradient-to-r from-green-600 to-green-700 text-white font-semibold rounded-lg shadow-sm hover:from-green-700 hover:to-green-800 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Alle Werkstätten
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={generatePDFWorkshopReports}
+                className="px-4 py-3 bg-gradient-to-r from-green-400 to-green-500 text-white font-semibold rounded-lg shadow-sm hover:from-green-500 hover:to-green-600 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📊 PDF: Einzelne Werkstätten
+              </button>
+              <button 
+                onClick={generateExcelWorkshopReports}
+                className="px-4 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white font-semibold rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Einzelne Werkstätten
+              </button>
+            </div>
           </div>
         </div>
 
         {/* Class Report */}
         <div className="bg-gradient-to-br from-blue-50 to-indigo-100 rounded-xl p-6 shadow-sm border border-blue-200">
-          <h3 className="text-lg font-semibold text-blue-900 mb-3 border-b border-blue-300 pb-2">Klassen-Berichte (PDF)</h3>
+          <h3 className="text-lg font-semibold text-blue-900 mb-3 border-b border-blue-300 pb-2">Klassen-Berichte</h3>
           <p className="text-sm text-blue-700 mb-4">
-            Umfassende PDF-Berichte für alle Klassen mit:
+            Umfassende Berichte für alle Klassen mit:
           </p>
           <ul className="text-xs text-blue-600 mb-4 list-disc list-inside space-y-1">
             <li>Alle Schüler pro Klasse</li>
@@ -4952,18 +5918,34 @@ export default function WerkstattVerwaltungApp() {
             <li>Lernbegleitung-Status</li>
           </ul>
           <div className="space-y-2">
-            <button 
-              onClick={generatePDFAllClassesReport}
-              className="w-full px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200"
-            >
-              📋 PDF: Alle Klassen (ein Dokument)
-            </button>
-            <button 
-              onClick={generatePDFClassReports}
-              className="w-full px-6 py-3 bg-gradient-to-r from-blue-400 to-blue-500 text-white font-semibold rounded-lg shadow-sm hover:from-blue-500 hover:to-blue-600 hover:shadow-md transition-all duration-200"
-            >
-              📋 PDF: Einzelne Klassen (mehrere Dokumente)
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={generatePDFAllClassesReport}
+                className="px-4 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📋 PDF: Alle Klassen
+              </button>
+              <button 
+                onClick={generateExcelAllClassesReport}
+                className="px-4 py-3 bg-gradient-to-r from-blue-600 to-blue-700 text-white font-semibold rounded-lg shadow-sm hover:from-blue-700 hover:to-blue-800 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Alle Klassen
+              </button>
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <button 
+                onClick={generatePDFClassReports}
+                className="px-4 py-3 bg-gradient-to-r from-blue-400 to-blue-500 text-white font-semibold rounded-lg shadow-sm hover:from-blue-500 hover:to-blue-600 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📋 PDF: Einzelne Klassen
+              </button>
+              <button 
+                onClick={generateExcelClassReports}
+                className="px-4 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Einzelne Klassen
+              </button>
+            </div>
           </div>
         </div>
       </div>
