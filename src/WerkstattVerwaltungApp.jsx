@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useMemo, useRef } from "react";
+import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
 import JSZip from "jszip";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription } from "./components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./components/ui/dialog";
 
 // WerkstattVerwaltungApp.jsx
 // Single-file React app (Tailwind CSS assumed) providing an administrative GUI
@@ -1436,6 +1436,70 @@ export default function WerkstattVerwaltungApp() {
   const currentTrimesterKeyRef = useRef(null);
   const isLoadingChoicesRef = useRef(false);
   
+  // Update priority scores based on assignment results (Option 1: Symmetrisches System)
+  const updatePriorityScores = useCallback((assignments, choices) => {
+    const updatedScores = { ...studentPriorityScores };
+    
+    // Initialize all students with default score of 5 if new
+    students.forEach(student => {
+      if (!updatedScores[student]) {
+        updatedScores[student] = 5;
+      }
+    });
+    
+    // Process each student and calculate score changes for both bands
+    students.forEach(student => {
+      let totalChange = 0;
+      let bandsProcessed = 0;
+      
+      // Process each band separately
+      ['erstesBand', 'zweitesBand'].forEach(band => {
+        const assigned = assignments[band]?.[student];
+        const studentChoices = choices[band]?.[student] || [];
+        
+        // Only update priority if student has choices (voted) for this band
+        if (studentChoices.length > 0 && assigned && assigned !== 'Nicht Zugeordnet' && assigned !== 'Nicht Zugeordnen') {
+          const gotFirstChoice = assigned === studentChoices[0];
+          const gotSecondChoice = assigned === studentChoices[1];
+          
+          let bandChange = 0;
+          
+          if (gotFirstChoice) {
+            // Got first choice: -1 point (they're happy, reduce priority so others get chances first)
+            bandChange = -1;
+          } else if (gotSecondChoice) {
+            // Got second choice: -0.5 points (rounded to -1 for simplicity)
+            bandChange = -1;
+          } else {
+            // Didn't get any choice: +1 point for not getting first choice
+            bandChange = 1;
+            // If they had a second choice and also didn't get it: +0.5 additional points (total +1.5)
+            if (studentChoices.length >= 2) {
+              bandChange = 1.5;
+            }
+          }
+          
+          totalChange += bandChange;
+          bandsProcessed++;
+        }
+        // If student has no choices for this band, skip it (no change to priority score)
+      });
+      
+      // Only update score if at least one band was processed (student voted in at least one band)
+      if (bandsProcessed > 0) {
+        // Calculate average change if both bands were processed, otherwise use the single band change
+        const averageChange = totalChange / bandsProcessed;
+        
+        // Apply the change (rounded to nearest integer for display, but keep precision internally)
+        const newScore = updatedScores[student] + averageChange;
+        updatedScores[student] = Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
+      }
+      // If bandsProcessed === 0, student didn't vote in any band, so score remains unchanged
+    });
+    
+    setStudentPriorityScores(updatedScores);
+  }, [studentPriorityScores, students]);
+  
   // Load assignments and choices when year/trimester changes or when first visiting wahl tab
   useEffect(() => {
     // Only load when entering wahl tab, not when leaving it
@@ -1582,7 +1646,7 @@ export default function WerkstattVerwaltungApp() {
     }, 500); // 500ms debounce
     
     return () => clearTimeout(timeoutId);
-  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices]);
+  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices, updatePriorityScores]);
   
   // Save assignments when leaving wahl tab (immediate save, no debounce)
   useEffect(() => {
@@ -1611,7 +1675,7 @@ export default function WerkstattVerwaltungApp() {
     
     // Update priority scores based on assignment results
     updatePriorityScores(dragAssignments, uploadedChoices);
-  }, [tab]); // Only trigger when tab changes
+  }, [tab, dragAssignments, uploadedChoices, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatePriorityScores]); // Only trigger when tab changes
   
   // Save choices when they change (per year/trimester)
   useEffect(() => {
@@ -1635,45 +1699,7 @@ export default function WerkstattVerwaltungApp() {
     const warningsKey = `wv_checkedWarnings_${key}`;
     save(warningsKey, checkedWarnings, false); // Don't auto-export warnings
   }, [checkedWarnings, yearTrimester, hasVisitedWahlTab]);
-  
-  // Check for unsaved changes
-  const hasUnsavedChanges = useMemo(() => {
-    const currentKey = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-    const saved = confirmedAssignments[currentKey];
-    
-    // Check if there are any assignments in dragAssignments
-    const hasAssignments = Object.keys(dragAssignments.erstesBand).length > 0 || 
-                          Object.keys(dragAssignments.zweitesBand).length > 0;
-    
-    if (!hasAssignments) return false;
-    
-    // Check if assignments differ from saved
-    if (!saved || !saved.assignments) return true;
-    
-    // Compare assignments
-    const savedErstes = saved.assignments.erstesBand || {};
-    const savedZweites = saved.assignments.zweitesBand || {};
-    
-    const currentErstes = dragAssignments.erstesBand || {};
-    const currentZweites = dragAssignments.zweitesBand || {};
-    
-    // Check if any student has different assignment
-    const allStudents = new Set([
-      ...Object.keys(savedErstes),
-      ...Object.keys(savedZweites),
-      ...Object.keys(currentErstes),
-      ...Object.keys(currentZweites)
-    ]);
-    
-    for (const student of allStudents) {
-      if (savedErstes[student] !== currentErstes[student] || 
-          savedZweites[student] !== currentZweites[student]) {
-        return true;
-      }
-    }
-    
-    return false;
-  }, [dragAssignments, confirmedAssignments, yearTrimester]);
+
 
   // Calculate real-time statistics from drag assignments
   const currentStatistics = useMemo(() => {
@@ -2105,70 +2131,6 @@ export default function WerkstattVerwaltungApp() {
     alert(`Zuweisungen für ${key} (beide Bänder) wurden als offiziell gespeichert und als CSV exportiert.`);
   }
 
-  // Update priority scores based on assignment results (Option 1: Symmetrisches System)
-  function updatePriorityScores(assignments, choices) {
-    const updatedScores = { ...studentPriorityScores };
-    
-    // Initialize all students with default score of 5 if new
-    students.forEach(student => {
-      if (!updatedScores[student]) {
-        updatedScores[student] = 5;
-      }
-    });
-    
-    // Process each student and calculate score changes for both bands
-    students.forEach(student => {
-      let totalChange = 0;
-      let bandsProcessed = 0;
-      
-      // Process each band separately
-      ['erstesBand', 'zweitesBand'].forEach(band => {
-        const assigned = assignments[band]?.[student];
-        const studentChoices = choices[band]?.[student] || [];
-        
-        // Only update priority if student has choices (voted) for this band
-        if (studentChoices.length > 0 && assigned && assigned !== 'Nicht Zugeordnet' && assigned !== 'Nicht Zugeordnen') {
-          const gotFirstChoice = assigned === studentChoices[0];
-          const gotSecondChoice = assigned === studentChoices[1];
-          
-          let bandChange = 0;
-          
-          if (gotFirstChoice) {
-            // Got first choice: -1 point (they're happy, reduce priority so others get chances first)
-            bandChange = -1;
-          } else if (gotSecondChoice) {
-            // Got second choice: -0.5 points (rounded to -1 for simplicity)
-            bandChange = -1;
-          } else {
-            // Didn't get any choice: +1 point for not getting first choice
-            bandChange = 1;
-            // If they had a second choice and also didn't get it: +0.5 additional points (total +1.5)
-            if (studentChoices.length >= 2) {
-              bandChange = 1.5;
-            }
-          }
-          
-          totalChange += bandChange;
-          bandsProcessed++;
-        }
-        // If student has no choices for this band, skip it (no change to priority score)
-      });
-      
-      // Only update score if at least one band was processed (student voted in at least one band)
-      if (bandsProcessed > 0) {
-        // Calculate average change if both bands were processed, otherwise use the single band change
-        const averageChange = totalChange / bandsProcessed;
-        
-        // Apply the change (rounded to nearest integer for display, but keep precision internally)
-        const newScore = updatedScores[student] + averageChange;
-        updatedScores[student] = Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
-      }
-      // If bandsProcessed === 0, student didn't vote in any band, so score remains unchanged
-    });
-    
-    setStudentPriorityScores(updatedScores);
-  }
-
   // Calculate priority score history over time for a student
   function calculatePriorityScoreHistory(student) {
     // If student has Lernbegleitung, return array of 10s
@@ -2465,7 +2427,7 @@ export default function WerkstattVerwaltungApp() {
       
       // Add worksheet to workbook (sheet name must be <= 31 chars and cannot contain : \ / ? * [ ])
       const safeSheetName = className
-        .replace(/[:\\\/\?\*\[\]]/g, '_')
+        .replace(/[:\\/?*[\]]/g, '_')
         .substring(0, 31);
       XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
     });
@@ -2640,7 +2602,7 @@ export default function WerkstattVerwaltungApp() {
       
       // Add worksheet to workbook (sheet name must be <= 31 chars and cannot contain : \ / ? * [ ])
       const safeSheetName = workshopName
-        .replace(/[:\\\/\?\*\[\]]/g, '_')
+        .replace(/[:\\/?*[\]]/g, '_')
         .substring(0, 31);
       XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
     });
@@ -3872,11 +3834,6 @@ export default function WerkstattVerwaltungApp() {
     });
   }
 
-  function finalizeAndOverwriteConfirm() {
-    if (window.confirm("Möchtest du diese Zuordnungen offiziell speichern und ggf. letztes Eintrag für dasses Jahr/Trimester überschreiben?")) {
-      saveConfirmedAssignments();
-    }
-  }
 
   // Workshops tab functions
   function updateWorkshopCapacity(name, cap) {
@@ -4402,10 +4359,6 @@ export default function WerkstattVerwaltungApp() {
     return !choices || choices.length === 0;
   }
 
-  // Get all students without votes for the active band
-  function getStudentsWithoutVotes() {
-    return students.filter(s => hasNoVotesForBand(s, activeBand));
-  }
 
   // Check for students with same first choice in both bands
   function getStudentsWithSameFirstChoiceInBothBands() {
