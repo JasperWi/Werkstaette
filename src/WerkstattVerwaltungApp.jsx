@@ -495,6 +495,54 @@ async function exportAllDataAsZIP(allData) {
     const timestamp = now.toISOString().replace(/[:.]/g, '-').slice(0, -5); // Format: 2025-01-15T14-30-00
     const zipFilename = `werkstatt-data_${timestamp}.zip`;
     
+    // Export choices separately by year/trimester (stored with pattern wv_choices_${key})
+    // We need to load all choices from localStorage directly (not from LS_KEYS)
+    const allChoicesKeys = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('wv_choices_')) {
+        allChoicesKeys.push(key);
+      }
+    }
+    
+    allChoicesKeys.forEach(choicesKey => {
+      try {
+        const choicesData = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
+        if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
+          // Extract the slotKey from the choicesKey (format: wv_choices_${slotKey})
+          const slotKey = choicesKey.replace('wv_choices_', '');
+          
+          // Export erstesBand choices
+          const erstesBandData = [];
+          erstesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+          Object.entries(choicesData.erstesBand || {}).forEach(([student, choices]) => {
+            if (Array.isArray(choices) && choices.length > 0) {
+              erstesBandData.push([student, choices[0] || '', choices[1] || '']);
+            }
+          });
+          
+          if (erstesBandData.length > 1) {
+            zip.file(`choices/${slotKey}_erstesBand.csv`, dataToCSVString(erstesBandData.slice(1), erstesBandData[0]));
+          }
+          
+          // Export zweitesBand choices
+          const zweitesBandData = [];
+          zweitesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+          Object.entries(choicesData.zweitesBand || {}).forEach(([student, choices]) => {
+            if (Array.isArray(choices) && choices.length > 0) {
+              zweitesBandData.push([student, choices[0] || '', choices[1] || '']);
+            }
+          });
+          
+          if (zweitesBandData.length > 1) {
+            zip.file(`choices/${slotKey}_zweitesBand.csv`, dataToCSVString(zweitesBandData.slice(1), zweitesBandData[0]));
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to export choices for ${choicesKey}:`, error);
+      }
+    });
+    
     // Export all data types
     Object.entries(LS_KEYS).forEach(([keyName, lsKey]) => {
       if (keyName === 'assignments') {
@@ -518,54 +566,6 @@ async function exportAllDataAsZIP(allData) {
           }
           
           zip.file(`assignments/${slotKey}.csv`, dataToCSVString(csvData.slice(1), csvData[0]));
-        });
-      } else if (keyName === 'choices') {
-        // Export choices separately by year/trimester (stored with pattern wv_choices_${key})
-        // We need to load all choices from localStorage
-        const allChoicesKeys = [];
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith('wv_choices_')) {
-            allChoicesKeys.push(key);
-          }
-        }
-        
-        allChoicesKeys.forEach(choicesKey => {
-          try {
-            const choicesData = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-            if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
-              // Extract the slotKey from the choicesKey (format: wv_choices_${slotKey})
-              const slotKey = choicesKey.replace('wv_choices_', '');
-              
-              // Export erstesBand choices
-              const erstesBandData = [];
-              erstesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
-              Object.entries(choicesData.erstesBand || {}).forEach(([student, choices]) => {
-                if (Array.isArray(choices) && choices.length > 0) {
-                  erstesBandData.push([student, choices[0] || '', choices[1] || '']);
-                }
-              });
-              
-              if (erstesBandData.length > 1) {
-                zip.file(`choices/${slotKey}_erstesBand.csv`, dataToCSVString(erstesBandData.slice(1), erstesBandData[0]));
-              }
-              
-              // Export zweitesBand choices
-              const zweitesBandData = [];
-              zweitesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
-              Object.entries(choicesData.zweitesBand || {}).forEach(([student, choices]) => {
-                if (Array.isArray(choices) && choices.length > 0) {
-                  zweitesBandData.push([student, choices[0] || '', choices[1] || '']);
-                }
-              });
-              
-              if (zweitesBandData.length > 1) {
-                zip.file(`choices/${slotKey}_zweitesBand.csv`, dataToCSVString(zweitesBandData.slice(1), zweitesBandData[0]));
-              }
-            }
-          } catch (error) {
-            console.error(`Failed to export choices for ${choicesKey}:`, error);
-          }
         });
       } else {
         const data = allData[lsKey];
@@ -1434,6 +1434,7 @@ export default function WerkstattVerwaltungApp() {
   });
   const hasVisitedWahlTab = useRef(false);
   const currentTrimesterKeyRef = useRef(null);
+  const isLoadingChoicesRef = useRef(false);
   
   // Load assignments and choices when year/trimester changes or when first visiting wahl tab
   useEffect(() => {
@@ -1487,13 +1488,26 @@ export default function WerkstattVerwaltungApp() {
     
     // Load choices for this year/trimester (stored in localStorage with key pattern)
     const choicesKey = `wv_choices_${key}`;
+    isLoadingChoicesRef.current = true; // Mark that we're loading choices
     const savedChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-    if (savedChoices && (Object.keys(savedChoices.erstesBand || {}).length > 0 || Object.keys(savedChoices.zweitesBand || {}).length > 0)) {
-      setUploadedChoices(savedChoices);
+    // Check if there are actually any choices (not just empty objects)
+    const hasErstesBandChoices = savedChoices && savedChoices.erstesBand && Object.keys(savedChoices.erstesBand).length > 0;
+    const hasZweitesBandChoices = savedChoices && savedChoices.zweitesBand && Object.keys(savedChoices.zweitesBand).length > 0;
+    
+    if (hasErstesBandChoices || hasZweitesBandChoices) {
+      // Only set choices if there are actual choices
+      setUploadedChoices({
+        erstesBand: savedChoices.erstesBand || {},
+        zweitesBand: savedChoices.zweitesBand || {}
+      });
     } else {
       // If no choices exist, set empty choices
       setUploadedChoices({ erstesBand: {}, zweitesBand: {} });
     }
+    // Reset the loading flag after a longer delay to ensure state has updated
+    setTimeout(() => {
+      isLoadingChoicesRef.current = false;
+    }, 500);
     
     // Load autoResult for this year/trimester
     const autoResultKey = `wv_autoResult_${key}`;
@@ -1602,6 +1616,7 @@ export default function WerkstattVerwaltungApp() {
   // Save choices when they change (per year/trimester)
   useEffect(() => {
     if (!hasVisitedWahlTab.current) return; // Don't save on initial mount
+    if (isLoadingChoicesRef.current) return; // Don't save while loading choices
     
     const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
     const choicesKey = `wv_choices_${key}`;
@@ -2009,10 +2024,16 @@ export default function WerkstattVerwaltungApp() {
           ...prev,
           [targetBand]: bandMap
         };
-        // Save choices for current year/trimester
+        // Save choices for current year/trimester immediately
         const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
         const choicesKey = `wv_choices_${key}`;
-        save(choicesKey, updated, false); // Don't auto-export choices
+        // Save immediately to localStorage (bypassing the useEffect to avoid race conditions)
+        try {
+          localStorage.setItem(choicesKey, JSON.stringify(updated));
+          console.log(`💾 Saved choices to ${choicesKey}:`, updated);
+        } catch (error) {
+          console.error(`Failed to save choices to ${choicesKey}:`, error);
+        }
         return updated;
       });
         setUploadSummary(summary);
