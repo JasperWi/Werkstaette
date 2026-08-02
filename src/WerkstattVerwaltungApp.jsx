@@ -30,6 +30,191 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./components/u
 // ----------------------------
 
 // ----------------------------
+// Band configuration (max 6 bands, configurable count per trimester)
+// ----------------------------
+const BANDS = [
+  { id: 'erstesBand', label: 'Erstes Band', shortLabel: '1. Band', number: 1 },
+  { id: 'zweitesBand', label: 'Zweites Band', shortLabel: '2. Band', number: 2 },
+  { id: 'drittesBand', label: 'Drittes Band', shortLabel: '3. Band', number: 3 },
+  { id: 'viertesBand', label: 'Viertes Band', shortLabel: '4. Band', number: 4 },
+  { id: 'fuenftesBand', label: 'Fünftes Band', shortLabel: '5. Band', number: 5 },
+  { id: 'sechstesBand', label: 'Sechstes Band', shortLabel: '6. Band', number: 6 },
+];
+const MAX_BANDS = BANDS.length;
+const DEFAULT_BAND_COUNT = 2;
+const ALL_BAND_IDS = BANDS.map(b => b.id);
+const DEFAULT_BAND_IDS = ALL_BAND_IDS.slice(0, DEFAULT_BAND_COUNT);
+
+function getBandIds(count = DEFAULT_BAND_COUNT) {
+  const n = Math.min(Math.max(1, count || DEFAULT_BAND_COUNT), MAX_BANDS);
+  return ALL_BAND_IDS.slice(0, n);
+}
+
+function getBandLabel(bandId) {
+  return BANDS.find(b => b.id === bandId)?.label || bandId;
+}
+
+function getBandShortLabel(bandId) {
+  return BANDS.find(b => b.id === bandId)?.shortLabel || bandId;
+}
+
+function createEmptyBandMap() {
+  const map = {};
+  ALL_BAND_IDS.forEach(id => { map[id] = {}; });
+  return map;
+}
+
+function createEmptyChoicesMap() {
+  return createEmptyBandMap();
+}
+
+function createStudentBandAssignments(studentList, bandIds = DEFAULT_BAND_IDS) {
+  const assignments = createEmptyBandMap();
+  bandIds.forEach(bandId => {
+    studentList.forEach(student => {
+      assignments[bandId][student] = undefined;
+    });
+  });
+  return assignments;
+}
+
+function isLegacySingleBandAssignments(assignments) {
+  if (!assignments || typeof assignments !== 'object') return false;
+  return !ALL_BAND_IDS.some(id => assignments[id] !== undefined && typeof assignments[id] === 'object');
+}
+
+function isMultiBandPayload(payload) {
+  if (!payload?.assignments) return false;
+  if (Array.isArray(payload.bands) && payload.bands.length > 0) return true;
+  return ALL_BAND_IDS.some(id => payload.assignments[id] && typeof payload.assignments[id] === 'object');
+}
+
+function getPayloadBandIds(payload) {
+  if (payload?.bands && Array.isArray(payload.bands) && payload.bands.length > 0) {
+    return payload.bands.filter(id => ALL_BAND_IDS.includes(id));
+  }
+  if (payload?.assignments) {
+    const found = ALL_BAND_IDS.filter(id =>
+      payload.assignments[id] && typeof payload.assignments[id] === 'object'
+    );
+    if (found.length > 0) return found;
+    if (isLegacySingleBandAssignments(payload.assignments)) {
+      return [ALL_BAND_IDS[0]];
+    }
+  }
+  return [...DEFAULT_BAND_IDS];
+}
+
+function normalizeBandDataObject(data) {
+  const normalized = createEmptyBandMap();
+  if (!data) return normalized;
+  ALL_BAND_IDS.forEach(id => {
+    if (data[id] && typeof data[id] === 'object') {
+      normalized[id] = { ...data[id] };
+    }
+  });
+  return normalized;
+}
+
+function isNotAssigned(assignment) {
+  if (!assignment) return true;
+  const normalized = String(assignment).toLowerCase().trim();
+  return normalized.includes('nicht') && normalized.includes('zugeordn');
+}
+
+function hasAnyAssignmentInBands(assignments, bandIds) {
+  return bandIds.some(bandId =>
+    Object.values(assignments[bandId] || {}).some(
+      assignment => assignment && assignment !== undefined && !isNotAssigned(assignment)
+    )
+  );
+}
+
+function hasAnyChoicesInBands(choices, bandIds) {
+  return bandIds.some(bandId => Object.keys(choices[bandId] || {}).length > 0);
+}
+
+function getAssignmentCsvHeaders(bandIds = DEFAULT_BAND_IDS) {
+  return ['Student', ...bandIds.map(id => getBandLabel(id).replace(/ /g, '')), 'Timestamp'];
+}
+
+function buildStudentReportRows(student, assignments, bandIds, rooms, teachers) {
+  return bandIds.map((bandId, index) => {
+    const workshop = assignments[bandId]?.[student] || 'Nicht zugeordnet';
+    const room = workshop !== 'Nicht zugeordnet' ? (rooms[workshop] || 'N/A') : '-';
+    const teacher = workshop !== 'Nicht zugeordnet' ? (teachers[workshop] || 'N/A') : '-';
+    return [index === 0 ? student : '', getBandShortLabel(bandId), workshop, room, teacher];
+  });
+}
+
+function computeBandStatistics(assignments, choices, bandIds) {
+  const perBand = {};
+  let totalFirst = 0;
+  let totalSecond = 0;
+  let totalAssignments = 0;
+
+  bandIds.forEach(bandId => {
+    let num1 = 0;
+    let num2 = 0;
+    let total = 0;
+    Object.entries(assignments[bandId] || {}).forEach(([student, assignedWorkshop]) => {
+      const studentChoices = choices[bandId]?.[student] || [];
+      if (studentChoices.length > 0 && assignedWorkshop && !isNotAssigned(assignedWorkshop)) {
+        total++;
+        if (assignedWorkshop === studentChoices[0]) num1++;
+        else if (studentChoices.length > 1 && assignedWorkshop === studentChoices[1]) num2++;
+      }
+    });
+    perBand[bandId] = {
+      num1,
+      num2,
+      total,
+      percentFirst: total > 0 ? (num1 / total) * 100 : 0,
+    };
+    totalFirst += num1;
+    totalSecond += num2;
+    totalAssignments += total;
+  });
+
+  return {
+    percentFirst: totalAssignments > 0 ? (totalFirst / totalAssignments) * 100 : 0,
+    totalFirst,
+    totalSecond,
+    perBand,
+  };
+}
+
+function applyPriorityScoreChangeForStudent(assignments, choices, bandIds, student, currentScore) {
+  let totalChange = 0;
+  let bandsProcessed = 0;
+
+  bandIds.forEach(bandId => {
+    const assigned = assignments[bandId]?.[student];
+    const studentChoices = choices[bandId]?.[student] || [];
+    const change = processPriorityChangeForBand(assigned, studentChoices);
+    if (change !== null) {
+      totalChange += change;
+      bandsProcessed++;
+    }
+  });
+
+  if (bandsProcessed === 0) return currentScore;
+  const averageChange = totalChange / bandsProcessed;
+  const newScore = currentScore + averageChange;
+  return Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
+}
+
+function processPriorityChangeForBand(assigned, studentChoices) {
+  if (studentChoices.length === 0 || !assigned || isNotAssigned(assigned)) {
+    return null;
+  }
+  const gotFirstChoice = assigned === studentChoices[0];
+  const gotSecondChoice = assigned === studentChoices[1];
+  if (gotFirstChoice || gotSecondChoice) return -1;
+  return studentChoices.length >= 2 ? 1.5 : 1;
+}
+
+// ----------------------------
 // Workshop Data Structure Helpers
 // ----------------------------
 // Workshops can be stored as: { name: capacity } (old format) or { name: { capacity: number, availableBands: ['erstesBand', 'zweitesBand'] } } (new format)
@@ -82,6 +267,86 @@ function normalizeWorkshopData(workshops) {
     }
   });
   return normalized;
+}
+
+function buildPriorityHistoryEntries(student, confirmedAssignments, lastChanged) {
+  const historyEntries = [];
+  Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
+    if (!payload.timestamp) return;
+    if (lastChanged && payload.timestamp < lastChanged) return;
+    if (isMultiBandPayload(payload)) {
+      const bandIds = getPayloadBandIds(payload);
+      const bandAssignments = {};
+      bandIds.forEach(bandId => {
+        bandAssignments[bandId] = payload.assignments[bandId]?.[student];
+      });
+      historyEntries.push({ slotKey, bandIds, bandAssignments, timestamp: payload.timestamp });
+    } else {
+      historyEntries.push({
+        slotKey,
+        bandIds: [ALL_BAND_IDS[0]],
+        bandAssignments: { [ALL_BAND_IDS[0]]: payload.assignments?.[student] },
+        timestamp: payload.timestamp,
+      });
+    }
+  });
+  historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+  return historyEntries;
+}
+
+function applyHistoryEntryScoreChange(entry, student, currentScore, loadFn) {
+  const choicesKey = `wv_choices_${entry.slotKey}`;
+  const trimesterChoices = loadFn(choicesKey, createEmptyChoicesMap());
+  let totalChange = 0;
+  let bandsProcessed = 0;
+
+  entry.bandIds.forEach(bandId => {
+    const assigned = entry.bandAssignments[bandId];
+    const studentChoices = trimesterChoices[bandId]?.[student] || [];
+    const change = processPriorityChangeForBand(assigned, studentChoices);
+    if (change !== null) {
+      totalChange += change;
+      bandsProcessed++;
+    }
+  });
+
+  if (bandsProcessed === 0) return currentScore;
+  const averageChange = totalChange / bandsProcessed;
+  const newScore = currentScore + averageChange;
+  return Math.max(1, Math.min(10, newScore));
+}
+
+function getWorkshopStudentsByBand(assignments, workshopName, bandIds) {
+  const result = {};
+  bandIds.forEach(bandId => {
+    result[bandId] = Object.entries(assignments[bandId] || {})
+      .filter(([, assignment]) => assignment === workshopName)
+      .map(([student]) => student)
+      .sort((a, b) => a.localeCompare(b));
+  });
+  return result;
+}
+
+function appendWorkshopBandExcelSections(tableData, studentsByBand, bandIds, studentClasses, studentAssistants, studentComments) {
+  let anyStudents = false;
+  bandIds.forEach(bandId => {
+    const bandStudents = studentsByBand[bandId] || [];
+    if (bandStudents.length > 0) {
+      anyStudents = true;
+      tableData.push([`${getBandLabel(bandId)}:`]);
+      tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
+      bandStudents.forEach(student => {
+        const className = studentClasses[student] || 'Unbekannt';
+        const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
+        const comment = studentComments[student] || '';
+        tableData.push([student, className, comment, needsAssistant]);
+      });
+      tableData.push([]);
+    }
+  });
+  if (!anyStudents) {
+    tableData.push(['Keine Schüler zugeordnet']);
+  }
 }
 
 // localStorage keys
@@ -438,30 +703,32 @@ function autoExportToCSV(key, data) {
 }
 
 // Export assignments to separate files by school year/trimester
-function exportAssignment(schoolYearStart, schoolYearEnd, trimester, assignments) {
+function exportAssignment(schoolYearStart, schoolYearEnd, trimester, assignments, bandIds = DEFAULT_BAND_IDS) {
   const key = getSchoolYearKey(schoolYearStart, schoolYearEnd, trimester);
   try {
     const csvData = [];
+    csvData.push(getAssignmentCsvHeaders(bandIds));
     
-    // Headers
-    csvData.push(['Student', 'ErstesBand', 'ZweitesBand', 'Timestamp']);
-    
-    // Process assignments
-    if (assignments?.erstesBand && assignments?.zweitesBand) {
-      const allStudents = new Set([
-        ...Object.keys(assignments.erstesBand),
-        ...Object.keys(assignments.zweitesBand)
-      ]);
+    if (assignments && !isLegacySingleBandAssignments(assignments)) {
+      const allStudents = new Set();
+      bandIds.forEach(bandId => {
+        Object.keys(assignments[bandId] || {}).forEach(s => allStudents.add(s));
+      });
       
       allStudents.forEach(student => {
-        const first = assignments.erstesBand[student] || 'Nicht Zugeordnet';
-        const second = assignments.zweitesBand[student] || 'Nicht Zugeordnet';
-        csvData.push([student, first, second, new Date().toISOString()]);
+        const row = [student];
+        bandIds.forEach(bandId => {
+          row.push(assignments[bandId]?.[student] || 'Nicht Zugeordnet');
+        });
+        row.push(new Date().toISOString());
+        csvData.push(row);
       });
     } else {
-      // Legacy format
       Object.entries(assignments || {}).forEach(([student, workshop]) => {
-        csvData.push([student, workshop, '', new Date().toISOString()]);
+        const row = [student, workshop];
+        for (let i = 1; i < bandIds.length; i++) row.push('');
+        row.push(new Date().toISOString());
+        csvData.push(row);
       });
     }
     
@@ -507,36 +774,23 @@ async function exportAllDataAsZIP(allData) {
     
     allChoicesKeys.forEach(choicesKey => {
       try {
-        const choicesData = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-        if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
-          // Extract the slotKey from the choicesKey (format: wv_choices_${slotKey})
+        const choicesData = load(choicesKey, createEmptyChoicesMap());
+        if (choicesData && hasAnyChoicesInBands(choicesData, ALL_BAND_IDS)) {
           const slotKey = choicesKey.replace('wv_choices_', '');
           
-          // Export erstesBand choices
-          const erstesBandData = [];
-          erstesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
-          Object.entries(choicesData.erstesBand || {}).forEach(([student, choices]) => {
-            if (Array.isArray(choices) && choices.length > 0) {
-              erstesBandData.push([student, choices[0] || '', choices[1] || '']);
+          ALL_BAND_IDS.forEach(bandId => {
+            const bandData = [];
+            bandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+            Object.entries(choicesData[bandId] || {}).forEach(([student, choices]) => {
+              if (Array.isArray(choices) && choices.length > 0) {
+                bandData.push([student, choices[0] || '', choices[1] || '']);
+              }
+            });
+            
+            if (bandData.length > 1) {
+              zip.file(`choices/${slotKey}_${bandId}.csv`, dataToCSVString(bandData.slice(1), bandData[0]));
             }
           });
-          
-          if (erstesBandData.length > 1) {
-            zip.file(`choices/${slotKey}_erstesBand.csv`, dataToCSVString(erstesBandData.slice(1), erstesBandData[0]));
-          }
-          
-          // Export zweitesBand choices
-          const zweitesBandData = [];
-          zweitesBandData.push(['Student', 'Wahl 1', 'Wahl 2']);
-          Object.entries(choicesData.zweitesBand || {}).forEach(([student, choices]) => {
-            if (Array.isArray(choices) && choices.length > 0) {
-              zweitesBandData.push([student, choices[0] || '', choices[1] || '']);
-            }
-          });
-          
-          if (zweitesBandData.length > 1) {
-            zip.file(`choices/${slotKey}_zweitesBand.csv`, dataToCSVString(zweitesBandData.slice(1), zweitesBandData[0]));
-          }
         }
       } catch (error) {
         console.error(`Failed to export choices for ${choicesKey}:`, error);
@@ -549,19 +803,30 @@ async function exportAllDataAsZIP(allData) {
         // Export assignments separately by year/trimester
         const assignments = allData[lsKey] || {};
         Object.entries(assignments).forEach(([slotKey, data]) => {
-          const csvData = [];
-          csvData.push(['Student', 'ErstesBand', 'ZweitesBand', 'Timestamp']);
+          const bandIds = getPayloadBandIds(data);
+          const headers = ['Student', ...bandIds.map(id => getBandLabel(id).replace(/ /g, '')), 'Timestamp'];
+          const csvData = [headers];
           
-          if (data?.assignments?.erstesBand && data?.assignments?.zweitesBand) {
-            const allStudents = new Set([
-              ...Object.keys(data.assignments.erstesBand),
-              ...Object.keys(data.assignments.zweitesBand)
-            ]);
+          if (data?.assignments && !isLegacySingleBandAssignments(data.assignments)) {
+            const allStudents = new Set();
+            bandIds.forEach(bandId => {
+              Object.keys(data.assignments[bandId] || {}).forEach(s => allStudents.add(s));
+            });
             
             allStudents.forEach(student => {
-              const first = data.assignments.erstesBand[student] || 'Nicht Zugeordnet';
-              const second = data.assignments.zweitesBand[student] || 'Nicht Zugeordnet';
-              csvData.push([student, first, second, data.timestamp || new Date().toISOString()]);
+              const row = [student];
+              bandIds.forEach(bandId => {
+                row.push(data.assignments[bandId]?.[student] || 'Nicht Zugeordnet');
+              });
+              row.push(data.timestamp || new Date().toISOString());
+              csvData.push(row);
+            });
+          } else if (data?.assignments) {
+            Object.entries(data.assignments).forEach(([student, workshop]) => {
+              const row = [student, workshop];
+              for (let i = 1; i < bandIds.length; i++) row.push('');
+              row.push(data.timestamp || new Date().toISOString());
+              csvData.push(row);
             });
           }
           
@@ -768,18 +1033,50 @@ async function importDataFromZIP(file) {
         const slotKey = filename.replace('assignments/', '').replace('.csv', '');
         if (!importedData.assignments) importedData.assignments = {};
         
-        const assignments = { erstesBand: {}, zweitesBand: {} };
+        const assignments = createEmptyBandMap();
+        const headerCells = data[0] || [];
+        const bandColumns = [];
+        headerCells.forEach((header, idx) => {
+          if (idx === 0 || idx === headerCells.length - 1) return;
+          const normalized = String(header || '').toLowerCase().replace(/\s/g, '');
+          const matchedBand = BANDS.find(b =>
+            normalized === b.id.toLowerCase() ||
+            normalized === b.label.toLowerCase().replace(/\s/g, '') ||
+            normalized === b.label.toLowerCase().replace(/\s/g, '').replace('ä', 'ae').replace('ü', 'ue').replace('ö', 'oe')
+          );
+          if (matchedBand) {
+            bandColumns.push({ idx, bandId: matchedBand.id });
+          } else if (normalized === 'erstesband' || normalized === '1.band') {
+            bandColumns.push({ idx, bandId: 'erstesBand' });
+          } else if (normalized === 'zweitesband' || normalized === '2.band') {
+            bandColumns.push({ idx, bandId: 'zweitesBand' });
+          } else if (normalized === 'drittesband' || normalized === '3.band') {
+            bandColumns.push({ idx, bandId: 'drittesBand' });
+          } else if (normalized === 'viertesband' || normalized === '4.band') {
+            bandColumns.push({ idx, bandId: 'viertesBand' });
+          } else if (normalized === 'fuenftesband' || normalized === '5.band') {
+            bandColumns.push({ idx, bandId: 'fuenftesBand' });
+          } else if (normalized === 'sechstesband' || normalized === '6.band') {
+            bandColumns.push({ idx, bandId: 'sechstesBand' });
+          }
+        });
+
+        if (bandColumns.length === 0) {
+          bandColumns.push({ idx: 1, bandId: 'erstesBand' }, { idx: 2, bandId: 'zweitesBand' });
+        }
+
         rows.forEach(row => {
-          if (row[0] && row[1]) {
-            assignments.erstesBand[row[0]] = row[1];
-            if (row[2]) assignments.zweitesBand[row[0]] = row[2];
+          if (row[0]) {
+            bandColumns.forEach(({ idx, bandId }) => {
+              if (row[idx]) assignments[bandId][row[0]] = row[idx];
+            });
           }
         });
         
         importedData.assignments[slotKey] = {
           assignments,
-          timestamp: rows[0]?.[3] || new Date().toISOString(),
-          bands: ['erstesBand', 'zweitesBand']
+          timestamp: rows[0]?.[headerCells.length - 1] || rows[0]?.[3] || new Date().toISOString(),
+          bands: bandColumns.map(c => c.bandId)
         };
       } else if (filename.startsWith('choices/')) {
         // Import choices for a specific trimester
@@ -792,7 +1089,7 @@ async function importDataFromZIP(file) {
           
           const choicesKey = `wv_choices_${slotKey}`;
           if (!importedData[choicesKey]) {
-            importedData[choicesKey] = { erstesBand: {}, zweitesBand: {} };
+            importedData[choicesKey] = createEmptyChoicesMap();
           }
           
           // Parse choices from CSV (format: Student, Wahl 1, Wahl 2)
@@ -862,210 +1159,191 @@ function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearSt
   
   if (!prevAssignment || !prevAssignment.assignments) return null;
   
-  // Check both bands to see if student took the fromCourse in previous trimester
-  const prevErstesBand = prevAssignment.assignments.erstesBand || {};
-  const prevZweitesBand = prevAssignment.assignments.zweitesBand || {};
+  const prevBandIds = getPayloadBandIds(prevAssignment);
+  let prevCourseByBand = {};
   
-  const prevCourseErstes = prevErstesBand[student];
-  const prevCourseZweites = prevZweitesBand[student];
+  if (isLegacySingleBandAssignments(prevAssignment.assignments)) {
+    const legacyCourse = prevAssignment.assignments[student];
+    if (legacyCourse && !isNotAssigned(legacyCourse)) {
+      prevCourseByBand[ALL_BAND_IDS[0]] = legacyCourse;
+    }
+  } else {
+    prevBandIds.forEach(bandId => {
+      const course = prevAssignment.assignments[bandId]?.[student];
+      if (course && !isNotAssigned(course)) {
+        prevCourseByBand[bandId] = course;
+      }
+    });
+  }
   
-  // Find a rule that applies
   for (const rule of folgekursRules) {
     let prevBand = null;
-    if (prevCourseErstes === rule.fromCourse) {
-      prevBand = 'erstesBand';
-    } else if (prevCourseZweites === rule.fromCourse) {
-      prevBand = 'zweitesBand';
+    for (const bandId of prevBandIds) {
+      if (prevCourseByBand[bandId] === rule.fromCourse) {
+        prevBand = bandId;
+        break;
+      }
     }
     
     if (prevBand) {
-      // Check if sameBand is required
       if (rule.sameBand) {
-        // Must be in the same band as the previous course
         return { course: rule.toCourse, band: prevBand };
-      } else {
-        // Can be in any band
-        return { course: rule.toCourse, band: null };
       }
+      return { course: rule.toCourse, band: null };
     }
   }
   
   return null;
 }
 
-// Auto-assignment algorithm for both Bands
-// Ensures students don't get the same workshop in both bands
-function autoAssignBothBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel = {}) {
-  // choicesMap: { erstesBand: { studentName: [choice1, choice2] }, zweitesBand: { studentName: [choice1, choice2] } }
-  
-  // Sort students by priority (higher priority first)
+function isFolgekursFulfilled(requiredFolgekurs, assignments, student, activeBandIds) {
+  if (!requiredFolgekurs) return true;
+  if (requiredFolgekurs.band !== null) {
+    return assignments[requiredFolgekurs.band]?.[student] === requiredFolgekurs.course;
+  }
+  return activeBandIds.some(
+    bandId => assignments[bandId]?.[student] === requiredFolgekurs.course
+  );
+}
+
+// Auto-assignment algorithm for all active bands
+function autoAssignAllBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel = {}, activeBandIds = DEFAULT_BAND_IDS) {
   const sortedStudents = [...students].sort((a, b) => {
     const scoreA = studentPriorityScores[a] || 5;
     const scoreB = studentPriorityScores[b] || 5;
-    return scoreB - scoreA; // Higher score first
+    return scoreB - scoreA;
   });
-  
-  // First, assign all students to their first band (prioritizing high priority students)
-  const erstesBandResult = autoAssignSingleBand(
-    sortedStudents, 
-    workshops, 
-    prevAssignments, 
-    prereqs, 
-    choicesMap.erstesBand, 
-    studentAssistants, 
-    studentPriorityScores, 
-    rules, 
-    confirmedAssignments, 
-    schoolYearStart, 
-    schoolYearEnd, 
-    currentTrimester, 
-    'erstesBand'
-  );
-  
-  // Now assign second band, but modify choices to exclude the workshop from first band
-  // and also exclude workshops that cannot be parallel with the first band assignment
-  const modifiedZweitesBandChoices = {};
-  
-  // Build modified choices map, removing first band assignments and "cannot be parallel" workshops
-  Object.keys(choicesMap.zweitesBand || {}).forEach(student => {
-    const originalChoices = choicesMap.zweitesBand[student] || [];
-    const firstBandWorkshop = erstesBandResult.assignments[student];
-    
-    // Filter out the first band workshop from second band choices
-    let filteredChoices = originalChoices.filter(choice => choice !== firstBandWorkshop);
-    
-    // Also filter out workshops that cannot be parallel with the first band assignment
-    if (firstBandWorkshop) {
-      const cannotBeParallelList = cannotBeParallel[firstBandWorkshop] || [];
-      filteredChoices = filteredChoices.filter(choice => !cannotBeParallelList.includes(choice));
-    }
-    
-    // Only include if there are still valid choices left
-    if (filteredChoices.length > 0) {
-      modifiedZweitesBandChoices[student] = filteredChoices;
-    }
-    // If student had choices but they all matched first band or cannot be parallel, they'll need manual assignment
-  });
-  
-  // Also include students who don't have first band assignments but have second band choices
-  Object.keys(choicesMap.zweitesBand || {}).forEach(student => {
-    if (!erstesBandResult.assignments[student] && choicesMap.zweitesBand[student]) {
-      modifiedZweitesBandChoices[student] = choicesMap.zweitesBand[student];
-    }
-  });
-  
-  // Assign second band with modified choices
-  const zweitesBandResult = autoAssignSingleBand(
-    sortedStudents, 
-    workshops, 
-    prevAssignments, 
-    prereqs, 
-    modifiedZweitesBandChoices, 
-    studentAssistants, 
-    studentPriorityScores, 
-    rules, 
-    confirmedAssignments, 
-    schoolYearStart, 
-    schoolYearEnd, 
-    currentTrimester, 
-    'zweitesBand'
-  );
-  
-  // Post-process to fix any conflicts: if a student got the same workshop in both bands, 
-  // unassign them from the second band (they'll need manual assignment)
+
+  const bandResults = {};
+  const cumulativeByStudent = {};
+  const allProblems = [];
   const conflicts = [];
-  Object.keys(erstesBandResult.assignments).forEach(student => {
-    const firstBand = erstesBandResult.assignments[student];
-    const secondBand = zweitesBandResult.assignments[student];
-    if (firstBand && secondBand && firstBand === secondBand) {
-      // Remove the conflicting assignment from second band
-      delete zweitesBandResult.assignments[student];
-      // Update capacity tracking
-      const capacity = getWorkshopCapacity(workshops[secondBand], secondBand);
-      if (zweitesBandResult.kap) {
-        zweitesBandResult.kap[secondBand] = (zweitesBandResult.kap[secondBand] || capacity) + 1;
+
+  activeBandIds.forEach(bandId => {
+    const priorWorkshopsByStudent = {};
+    Object.keys(cumulativeByStudent).forEach(student => {
+      priorWorkshopsByStudent[student] = [...(cumulativeByStudent[student] || [])];
+    });
+
+    const modifiedChoices = {};
+    Object.keys(choicesMap[bandId] || {}).forEach(student => {
+      const originalChoices = choicesMap[bandId][student] || [];
+      const priorWorkshops = priorWorkshopsByStudent[student] || [];
+      let filteredChoices = originalChoices.filter(choice => !priorWorkshops.includes(choice));
+
+      priorWorkshops.forEach(priorWorkshop => {
+        const cannotList = cannotBeParallel[priorWorkshop] || [];
+        filteredChoices = filteredChoices.filter(choice => !cannotList.includes(choice));
+      });
+
+      if (filteredChoices.length > 0) {
+        modifiedChoices[student] = filteredChoices;
       }
-      // Update statistics
-      if (zweitesBandResult.num1 > 0) zweitesBandResult.num1--;
-      if (zweitesBandResult.num2 > 0) zweitesBandResult.num2--;
-      conflicts.push(`${student} wurde in beiden Bändern ${firstBand} zugeordnet. Die Zuordnung im Zweiten Band wurde entfernt - bitte manuell zuordnen.`);
-    }
-  });
-  
-  // Also check students assigned in second band but not in first band
-  Object.keys(zweitesBandResult.assignments).forEach(student => {
-    const firstBand = erstesBandResult.assignments[student];
-    const secondBand = zweitesBandResult.assignments[student];
-    if (firstBand && secondBand && firstBand === secondBand) {
-      // This should have been caught above, but double-check
-      delete zweitesBandResult.assignments[student];
-      const capacity = getWorkshopCapacity(workshops[secondBand], secondBand);
-      if (zweitesBandResult.kap) {
-        zweitesBandResult.kap[secondBand] = (zweitesBandResult.kap[secondBand] || capacity) + 1;
+    });
+
+    Object.keys(choicesMap[bandId] || {}).forEach(student => {
+      if (!(priorWorkshopsByStudent[student]?.length) && choicesMap[bandId][student] && !modifiedChoices[student]) {
+        modifiedChoices[student] = choicesMap[bandId][student];
       }
-      if (zweitesBandResult.num1 > 0) zweitesBandResult.num1--;
-      if (zweitesBandResult.num2 > 0) zweitesBandResult.num2--;
-    }
-  });
-  
-  // Check for "cannot be parallel" conflicts
-  Object.keys(erstesBandResult.assignments).forEach(student => {
-    const firstBand = erstesBandResult.assignments[student];
-    const secondBand = zweitesBandResult.assignments[student];
-    if (firstBand && secondBand) {
-      // Check if first band workshop has second band workshop in its "cannot be parallel" list
-      const firstBandCannotBeParallel = cannotBeParallel[firstBand] || [];
-      if (firstBandCannotBeParallel.includes(secondBand)) {
-        // Remove the conflicting assignment from second band
-        delete zweitesBandResult.assignments[student];
-        const capacity = getWorkshopCapacity(workshops[secondBand], secondBand);
-        if (zweitesBandResult.kap) {
-          zweitesBandResult.kap[secondBand] = (zweitesBandResult.kap[secondBand] || capacity) + 1;
+    });
+
+    const bandResult = autoAssignSingleBand(
+      sortedStudents,
+      workshops,
+      prevAssignments,
+      prereqs,
+      modifiedChoices,
+      studentAssistants,
+      studentPriorityScores,
+      rules,
+      confirmedAssignments,
+      schoolYearStart,
+      schoolYearEnd,
+      currentTrimester,
+      bandId
+    );
+
+    bandResults[bandId] = bandResult;
+
+    Object.keys(bandResult.assignments).forEach(student => {
+      const workshop = bandResult.assignments[student];
+      if (workshop) {
+        if (!cumulativeByStudent[student]) cumulativeByStudent[student] = [];
+        cumulativeByStudent[student].push(workshop);
+      }
+    });
+
+    allProblems.push(
+      ...bandResult.problems.map(p => ({ message: p, band: bandId, bandLabel: getBandLabel(bandId) }))
+    );
+
+    priorWorkshopsByStudent && Object.keys(bandResult.assignments).forEach(student => {
+      const currentWorkshop = bandResult.assignments[student];
+      const priorWorkshops = priorWorkshopsByStudent[student] || [];
+      if (!currentWorkshop) return;
+
+      if (priorWorkshops.includes(currentWorkshop)) {
+        delete bandResult.assignments[student];
+        const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
+        if (bandResult.kap) {
+          bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
         }
-        if (zweitesBandResult.num1 > 0) zweitesBandResult.num1--;
-        if (zweitesBandResult.num2 > 0) zweitesBandResult.num2--;
-        conflicts.push(`${student} wurde ${firstBand} (Erstes Band) und ${secondBand} (Zweites Band) zugeordnet, aber diese können nicht parallel belegt werden. Die Zuordnung im Zweiten Band wurde entfernt - bitte manuell zuordnen.`);
+        if (bandResult.num1 > 0) bandResult.num1--;
+        if (bandResult.num2 > 0) bandResult.num2--;
+        conflicts.push(`${student} wurde in mehreren Bändern ${currentWorkshop} zugeordnet. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
       }
-      // Check if second band workshop has first band workshop in its "cannot be parallel" list
-      const secondBandCannotBeParallel = cannotBeParallel[secondBand] || [];
-      if (secondBandCannotBeParallel.includes(firstBand)) {
-        // Remove the conflicting assignment from second band
-        delete zweitesBandResult.assignments[student];
-        const capacity = getWorkshopCapacity(workshops[secondBand], secondBand);
-        if (zweitesBandResult.kap) {
-          zweitesBandResult.kap[secondBand] = (zweitesBandResult.kap[secondBand] || capacity) + 1;
+
+      priorWorkshops.forEach(priorWorkshop => {
+        const priorCannot = cannotBeParallel[priorWorkshop] || [];
+        const currentCannot = cannotBeParallel[currentWorkshop] || [];
+        if (priorCannot.includes(currentWorkshop) || currentCannot.includes(priorWorkshop)) {
+          if (bandResult.assignments[student] === currentWorkshop) {
+            delete bandResult.assignments[student];
+            const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
+            if (bandResult.kap) {
+              bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
+            }
+            if (bandResult.num1 > 0) bandResult.num1--;
+            if (bandResult.num2 > 0) bandResult.num2--;
+            conflicts.push(`${student} wurde ${priorWorkshop} und ${currentWorkshop} parallel zugeordnet, aber diese können nicht parallel belegt werden. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
+          }
         }
-        if (zweitesBandResult.num1 > 0) zweitesBandResult.num1--;
-        if (zweitesBandResult.num2 > 0) zweitesBandResult.num2--;
-        conflicts.push(`${student} wurde ${firstBand} (Erstes Band) und ${secondBand} (Zweites Band) zugeordnet, aber diese können nicht parallel belegt werden. Die Zuordnung im Zweiten Band wurde entfernt - bitte manuell zuordnen.`);
-      }
-    }
+      });
+    });
   });
-  
-  // Combine problems from both Bands with band information
-  const allProblems = [
-    ...erstesBandResult.problems.map(p => ({ message: p, band: 'erstesBand', bandLabel: 'Erstes Band' })),
-    ...zweitesBandResult.problems.map(p => ({ message: p, band: 'zweitesBand', bandLabel: 'Zweites Band' })),
-    ...conflicts.map(p => ({ message: p, band: 'both', bandLabel: 'Beide Bänder' }))
-  ];
-  
-  // Calculate combined statistics
-  const totalStudents = students.length;
-  const totalFirst = erstesBandResult.num1 + zweitesBandResult.num1;
-  const totalSecond = erstesBandResult.num2 + zweitesBandResult.num2;
-  const percentFirst = (totalFirst / (totalStudents * 2)) * 100; // 2 assignments per student
-  
+
+  allProblems.push(...conflicts.map(p => ({ message: p, band: 'all', bandLabel: 'Alle Bänder' })));
+
+  let totalFirst = 0;
+  let totalSecond = 0;
+  activeBandIds.forEach(bandId => {
+    totalFirst += bandResults[bandId]?.num1 || 0;
+    totalSecond += bandResults[bandId]?.num2 || 0;
+  });
+  const percentFirst = students.length > 0 && activeBandIds.length > 0
+    ? (totalFirst / (students.length * activeBandIds.length)) * 100
+    : 0;
+
   return {
-    erstesBand: erstesBandResult,
-    zweitesBand: zweitesBandResult,
+    bandResults,
     problems: allProblems,
     totalFirst,
     totalSecond,
-    percentFirst
+    percentFirst,
+    activeBandIds,
+    // Backward compatibility for code expecting erstesBand/zweitesBand
+    erstesBand: bandResults[activeBandIds[0]] || { assignments: {}, problems: [], num1: 0, num2: 0 },
+    zweitesBand: bandResults[activeBandIds[1]] || { assignments: {}, problems: [], num1: 0, num2: 0 },
   };
 }
 
-// Single Band auto-assignment algorithm with special assistance distribution and priority scoring
+// Legacy alias kept for external references
+// eslint-disable-next-line no-unused-vars
+function autoAssignBothBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants, studentPriorityScores, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel) {
+  return autoAssignAllBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants, studentPriorityScores, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel, DEFAULT_BAND_IDS);
+}
+
+// Single Band auto-assignment algorithm
 function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, band) {
   // choicesMap: { studentName: [choice1, choice2] }
   // Filter workshops to only those available in this band
@@ -1099,7 +1377,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
       filteredChoicesMap[student] = choices;
     } else if (choicesMap[student] && choicesMap[student].length > 0) {
       // Student has choices but none are available in this band
-      problems.push(`${student} hat nur Werkstätten gewählt, die in ${band === 'erstesBand' ? 'Erstes' : 'Zweites'} Band nicht verfügbar sind.`);
+      problems.push(`${student} hat nur Werkstätten gewählt, die in ${getBandLabel(band)} nicht verfügbar sind.`);
     }
   });
 
@@ -1294,12 +1572,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   return { assignments, problems, kap, num1, num2, percentFirst };
 }
 
-// Helper function to check if an assignment is "not assigned"
-function isNotAssigned(assignment) {
-  if (!assignment) return true;
-  const normalized = String(assignment).toLowerCase().trim();
-  return normalized.includes('nicht') && normalized.includes('zugeordn');
-}
+// (isNotAssigned defined above with band helpers)
 
 // ----------------------------
 // Main component
@@ -1405,9 +1678,11 @@ export default function WerkstattVerwaltungApp() {
     }, [studentClasses]);
 
   // Wahl tab state
-  const [uploadedChoices, setUploadedChoices] = useState(() => ({ erstesBand: {}, zweitesBand: {} }));
+  const [uploadedChoices, setUploadedChoices] = useState(() => createEmptyChoicesMap());
   const [autoResult, setAutoResult] = useState(null);
-  const [dragAssignments, setDragAssignments] = useState(() => ({ erstesBand: {}, zweitesBand: {} }));
+  const [dragAssignments, setDragAssignments] = useState(() => createEmptyBandMap());
+  const [activeBandCount, setActiveBandCount] = useState(DEFAULT_BAND_COUNT);
+  const activeBandIds = useMemo(() => getBandIds(activeBandCount), [activeBandCount]);
   const [yearTrimester, setYearTrimester] = useState(() => {
     const defaultSchoolYear = getDefaultSchoolYear();
     return { 
@@ -1437,68 +1712,24 @@ export default function WerkstattVerwaltungApp() {
   const isLoadingChoicesRef = useRef(false);
   
   // Update priority scores based on assignment results (Option 1: Symmetrisches System)
-  const updatePriorityScores = useCallback((assignments, choices) => {
+  const updatePriorityScores = useCallback((assignments, choices, bandIds = activeBandIds) => {
     const updatedScores = { ...studentPriorityScores };
     
-    // Initialize all students with default score of 5 if new
     students.forEach(student => {
       if (!updatedScores[student]) {
         updatedScores[student] = 5;
       }
     });
     
-    // Process each student and calculate score changes for both bands
     students.forEach(student => {
-      let totalChange = 0;
-      let bandsProcessed = 0;
-      
-      // Process each band separately
-      ['erstesBand', 'zweitesBand'].forEach(band => {
-        const assigned = assignments[band]?.[student];
-        const studentChoices = choices[band]?.[student] || [];
-        
-        // Only update priority if student has choices (voted) for this band
-        if (studentChoices.length > 0 && assigned && assigned !== 'Nicht Zugeordnet' && assigned !== 'Nicht Zugeordnen') {
-          const gotFirstChoice = assigned === studentChoices[0];
-          const gotSecondChoice = assigned === studentChoices[1];
-          
-          let bandChange = 0;
-          
-          if (gotFirstChoice) {
-            // Got first choice: -1 point (they're happy, reduce priority so others get chances first)
-            bandChange = -1;
-          } else if (gotSecondChoice) {
-            // Got second choice: -0.5 points (rounded to -1 for simplicity)
-            bandChange = -1;
-          } else {
-            // Didn't get any choice: +1 point for not getting first choice
-            bandChange = 1;
-            // If they had a second choice and also didn't get it: +0.5 additional points (total +1.5)
-            if (studentChoices.length >= 2) {
-              bandChange = 1.5;
-            }
-          }
-          
-          totalChange += bandChange;
-          bandsProcessed++;
-        }
-        // If student has no choices for this band, skip it (no change to priority score)
-      });
-      
-      // Only update score if at least one band was processed (student voted in at least one band)
-      if (bandsProcessed > 0) {
-        // Calculate average change if both bands were processed, otherwise use the single band change
-        const averageChange = totalChange / bandsProcessed;
-        
-        // Apply the change (rounded to nearest integer for display, but keep precision internally)
-        const newScore = updatedScores[student] + averageChange;
-        updatedScores[student] = Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
+      const newScore = applyPriorityScoreChangeForStudent(assignments, choices, bandIds, student, updatedScores[student] || 5);
+      if (newScore !== (updatedScores[student] || 5)) {
+        updatedScores[student] = newScore;
       }
-      // If bandsProcessed === 0, student didn't vote in any band, so score remains unchanged
     });
     
     setStudentPriorityScores(updatedScores);
-  }, [studentPriorityScores, students]);
+  }, [studentPriorityScores, students, activeBandIds]);
   
   // Load assignments and choices when year/trimester changes or when first visiting wahl tab
   useEffect(() => {
@@ -1518,55 +1749,27 @@ export default function WerkstattVerwaltungApp() {
     // Load assignments for this year/trimester
     const savedAssignments = confirmedAssignments[key];
     if (savedAssignments && savedAssignments.assignments) {
-      // Check if there are actually any real assignments (not just undefined or empty values)
-      const hasErstesBand = savedAssignments.assignments.erstesBand && 
-        Object.entries(savedAssignments.assignments.erstesBand).some(([student, assignment]) => 
-          assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
-        );
-      const hasZweitesBand = savedAssignments.assignments.zweitesBand && 
-        Object.entries(savedAssignments.assignments.zweitesBand).some(([student, assignment]) => 
-          assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
-        );
-      
-      if (hasErstesBand || hasZweitesBand) {
-        // Only load if there are actual assignments
-        setDragAssignments(savedAssignments.assignments);
+      const savedBandIds = getPayloadBandIds(savedAssignments);
+      setActiveBandCount(savedBandIds.length);
+
+      if (hasAnyAssignmentInBands(savedAssignments.assignments, savedBandIds)) {
+        setDragAssignments(normalizeBandDataObject(savedAssignments.assignments));
       } else {
-        // If assignments object exists but has no real assignments, reset to empty
-        const emptyAssignments = { erstesBand: {}, zweitesBand: {} };
-        students.forEach(student => {
-          emptyAssignments.erstesBand[student] = undefined;
-          emptyAssignments.zweitesBand[student] = undefined;
-        });
-        setDragAssignments(emptyAssignments);
+        setDragAssignments(createStudentBandAssignments(students, savedBandIds));
       }
     } else {
-      // If no assignments exist, set empty assignments for all students
-      const emptyAssignments = { erstesBand: {}, zweitesBand: {} };
-      students.forEach(student => {
-        emptyAssignments.erstesBand[student] = undefined;
-        emptyAssignments.zweitesBand[student] = undefined;
-      });
-      setDragAssignments(emptyAssignments);
+      setActiveBandCount(DEFAULT_BAND_COUNT);
+      setDragAssignments(createStudentBandAssignments(students, getBandIds(DEFAULT_BAND_COUNT)));
     }
     
-    // Load choices for this year/trimester (stored in localStorage with key pattern)
     const choicesKey = `wv_choices_${key}`;
-    isLoadingChoicesRef.current = true; // Mark that we're loading choices
-    const savedChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-    // Check if there are actually any choices (not just empty objects)
-    const hasErstesBandChoices = savedChoices && savedChoices.erstesBand && Object.keys(savedChoices.erstesBand).length > 0;
-    const hasZweitesBandChoices = savedChoices && savedChoices.zweitesBand && Object.keys(savedChoices.zweitesBand).length > 0;
+    isLoadingChoicesRef.current = true;
+    const savedChoices = normalizeBandDataObject(load(choicesKey, createEmptyChoicesMap()));
     
-    if (hasErstesBandChoices || hasZweitesBandChoices) {
-      // Only set choices if there are actual choices
-      setUploadedChoices({
-        erstesBand: savedChoices.erstesBand || {},
-        zweitesBand: savedChoices.zweitesBand || {}
-      });
+    if (hasAnyChoicesInBands(savedChoices, ALL_BAND_IDS)) {
+      setUploadedChoices(savedChoices);
     } else {
-      // If no choices exist, set empty choices
-      setUploadedChoices({ erstesBand: {}, zweitesBand: {} });
+      setUploadedChoices(createEmptyChoicesMap());
     }
     // Reset the loading flag after a longer delay to ensure state has updated
     setTimeout(() => {
@@ -1612,20 +1815,13 @@ export default function WerkstattVerwaltungApp() {
     currentTrimesterKeyRef.current = key;
     
     // Check if there are any actual assignments (not just undefined values)
-    const hasActualAssignments = Object.entries(dragAssignments.erstesBand || {}).some(([student, assignment]) => 
-      assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
-    ) || Object.entries(dragAssignments.zweitesBand || {}).some(([student, assignment]) => 
-      assignment && assignment !== undefined && assignment !== 'Nicht Zugeordnet' && assignment !== 'Nicht Zugeordnen'
-    );
+    const hasActualAssignments = hasAnyAssignmentInBands(dragAssignments, activeBandIds);
     
     if (!hasActualAssignments) return;
     
-    // Debounce the save to avoid too many writes
     const timeoutId = setTimeout(() => {
-      // Double-check that we're still on the same trimester (prevent race condition)
       const currentKey = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
       if (currentKey !== currentTrimesterKeyRef.current) {
-        // Trimester was changed, don't save
         return;
       }
       
@@ -1633,20 +1829,18 @@ export default function WerkstattVerwaltungApp() {
       payload[key] = { 
         assignments: dragAssignments, 
         timestamp: new Date().toISOString(),
-        bands: ['erstesBand', 'zweitesBand']
+        bands: activeBandIds
       };
       save(LS_KEYS.assignments, payload);
       setConfirmedAssignments(payload);
       
-      // Export to CSV by school year/trimester
-      exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments);
+      exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments, activeBandIds);
       
-      // Update priority scores based on assignment results
-      updatePriorityScores(dragAssignments, uploadedChoices);
-    }, 500); // 500ms debounce
+      updatePriorityScores(dragAssignments, uploadedChoices, activeBandIds);
+    }, 500);
     
     return () => clearTimeout(timeoutId);
-  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices, updatePriorityScores]);
+  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices, updatePriorityScores, activeBandIds]);
   
   // Save assignments when leaving wahl tab (immediate save, no debounce)
   useEffect(() => {
@@ -1656,8 +1850,7 @@ export default function WerkstattVerwaltungApp() {
     const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
     
     // Check if there are any actual assignments
-    const hasAssignments = Object.keys(dragAssignments.erstesBand || {}).length > 0 || 
-                          Object.keys(dragAssignments.zweitesBand || {}).length > 0;
+    const hasAssignments = hasAnyAssignmentInBands(dragAssignments, activeBandIds);
     
     if (!hasAssignments) return;
     
@@ -1665,17 +1858,15 @@ export default function WerkstattVerwaltungApp() {
     payload[key] = { 
       assignments: dragAssignments, 
       timestamp: new Date().toISOString(),
-      bands: ['erstesBand', 'zweitesBand']
+      bands: activeBandIds
     };
     save(LS_KEYS.assignments, payload);
     setConfirmedAssignments(payload);
     
-    // Export to CSV by school year/trimester
-    exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments);
+    exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments, activeBandIds);
     
-    // Update priority scores based on assignment results
-    updatePriorityScores(dragAssignments, uploadedChoices);
-  }, [tab, dragAssignments, uploadedChoices, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatePriorityScores]); // Only trigger when tab changes
+    updatePriorityScores(dragAssignments, uploadedChoices, activeBandIds);
+  }, [tab, dragAssignments, uploadedChoices, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatePriorityScores, activeBandIds]);
   
   // Save choices when they change (per year/trimester)
   useEffect(() => {
@@ -1686,8 +1877,8 @@ export default function WerkstattVerwaltungApp() {
     const choicesKey = `wv_choices_${key}`;
     
     // Only save if there are actual choices
-    if (Object.keys(uploadedChoices.erstesBand || {}).length > 0 || Object.keys(uploadedChoices.zweitesBand || {}).length > 0) {
-      save(choicesKey, uploadedChoices, false); // Don't auto-export choices
+    if (hasAnyChoicesInBands(uploadedChoices, ALL_BAND_IDS)) {
+      save(choicesKey, uploadedChoices, false);
     }
   }, [uploadedChoices, yearTrimester, hasVisitedWahlTab]);
   
@@ -1703,78 +1894,16 @@ export default function WerkstattVerwaltungApp() {
 
   // Calculate real-time statistics from drag assignments
   const currentStatistics = useMemo(() => {
-    const erstesBand = dragAssignments.erstesBand || {};
-    const zweitesBand = dragAssignments.zweitesBand || {};
-    const erstesChoices = uploadedChoices.erstesBand || {};
-    const zweitesChoices = uploadedChoices.zweitesBand || {};
-    
-    // Count first and second choices for each band separately
-    let erstesBandFirst = 0;
-    let erstesBandSecond = 0;
-    let erstesBandTotal = 0; // Total assignments with choices in Erstes Band (including those who got neither)
-    let zweitesBandFirst = 0;
-    let zweitesBandSecond = 0;
-    let zweitesBandTotal = 0; // Total assignments with choices in Zweites Band (including those who got neither)
-    
-    // Count Erstes Band - count ALL students who have choices for this band and are assigned
-    Object.entries(erstesBand).forEach(([student, assignedWorkshop]) => {
-      const choices = erstesChoices[student] || [];
-      // Only count if student has choices for this band AND is assigned to a real workshop
-      if (choices.length > 0 && assignedWorkshop && !isNotAssigned(assignedWorkshop)) {
-        erstesBandTotal++; // Count ALL assignments (including those who got neither first nor second)
-        if (assignedWorkshop === choices[0]) {
-          erstesBandFirst++;
-        } else if (choices.length > 1 && assignedWorkshop === choices[1]) {
-          erstesBandSecond++;
-        }
-        // If neither first nor second, we still count it in erstesBandTotal but don't increment first/second
-      }
-    });
-    
-    // Count Zweites Band - count ALL students who have choices for this band and are assigned
-    Object.entries(zweitesBand).forEach(([student, assignedWorkshop]) => {
-      const choices = zweitesChoices[student] || [];
-      // Only count if student has choices for this band AND is assigned to a real workshop
-      if (choices.length > 0 && assignedWorkshop && !isNotAssigned(assignedWorkshop)) {
-        zweitesBandTotal++; // Count ALL assignments (including those who got neither first nor second)
-        if (assignedWorkshop === choices[0]) {
-          zweitesBandFirst++;
-        } else if (choices.length > 1 && assignedWorkshop === choices[1]) {
-          zweitesBandSecond++;
-        }
-        // If neither first nor second, we still count it in zweitesBandTotal but don't increment first/second
-      }
-    });
-    
-    // Calculate percentages for each band separately
-    // Percentage should be: first choices / total assignments (including those who got neither)
-    const erstesBandPercentFirst = erstesBandTotal > 0 ? (erstesBandFirst / erstesBandTotal) * 100 : 0;
-    const zweitesBandPercentFirst = zweitesBandTotal > 0 ? (zweitesBandFirst / zweitesBandTotal) * 100 : 0;
-    
-    // Combined totals
-    const totalFirst = erstesBandFirst + zweitesBandFirst;
-    const totalSecond = erstesBandSecond + zweitesBandSecond;
-    const totalAssignments = erstesBandTotal + zweitesBandTotal; // Total from both bands (including those who got neither)
-    const percentFirst = totalAssignments > 0 ? (totalFirst / totalAssignments) * 100 : 0;
-    
+    const stats = computeBandStatistics(dragAssignments, uploadedChoices, activeBandIds);
     return {
-      percentFirst,
-      totalFirst,
-      totalSecond,
-      erstesBand: {
-        num1: erstesBandFirst,
-        num2: erstesBandSecond,
-        total: erstesBandTotal,
-        percentFirst: erstesBandPercentFirst
-      },
-      zweitesBand: {
-        num1: zweitesBandFirst,
-        num2: zweitesBandSecond,
-        total: zweitesBandTotal,
-        percentFirst: zweitesBandPercentFirst
-      }
+      percentFirst: stats.percentFirst,
+      totalFirst: stats.totalFirst,
+      totalSecond: stats.totalSecond,
+      perBand: stats.perBand,
+      erstesBand: stats.perBand[activeBandIds[0]] || { num1: 0, num2: 0, total: 0, percentFirst: 0 },
+      zweitesBand: stats.perBand[activeBandIds[1]] || { num1: 0, num2: 0, total: 0, percentFirst: 0 },
     };
-  }, [dragAssignments, uploadedChoices]);
+  }, [dragAssignments, uploadedChoices, activeBandIds]);
 
   // drag/drop UI state
   const [dragHover, setDragHover] = useState({ workshop: null, invalid: false, message: null });
@@ -1819,8 +1948,7 @@ export default function WerkstattVerwaltungApp() {
 
   // CSV upload handler for student choices
   const [uploadSummary, setUploadSummary] = useState(null);
-  const fileInputRefBand1 = React.useRef(null);
-  const fileInputRefBand2 = React.useRef(null);
+  const fileInputRefs = React.useRef({});
 
   // Helper function to parse Q1/Q2 values, ignoring text after colon
   function parseChoiceValue(value) {
@@ -2065,10 +2193,8 @@ export default function WerkstattVerwaltungApp() {
         setUploadSummary(summary);
 
         // Reset file input
-      if (targetBand === 'erstesBand' && fileInputRefBand1.current) {
-        fileInputRefBand1.current.value = '';
-      } else if (targetBand === 'zweitesBand' && fileInputRefBand2.current) {
-        fileInputRefBand2.current.value = '';
+      if (fileInputRefs.current[targetBand]) {
+        fileInputRefs.current[targetBand].value = '';
       }
 
       alert(`Datei erfolgreich hochgeladen für ${summary.band}!\n${summary.updatedChoices} Schüler aktualisiert.`);
@@ -2078,25 +2204,21 @@ export default function WerkstattVerwaltungApp() {
   }
 
   function runAutoAssign() {
-    const res = autoAssignBothBands(students, workshops, prevAssignments, prereqs, JSON.parse(JSON.stringify(uploadedChoices)), studentAssistants, studentPriorityScores, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, cannotBeParallel);
+    const res = autoAssignAllBands(students, workshops, prevAssignments, prereqs, JSON.parse(JSON.stringify(uploadedChoices)), studentAssistants, studentPriorityScores, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, cannotBeParallel, activeBandIds);
     setAutoResult(res);
     
-    // Save autoResult for this year/trimester
     const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
     const autoResultKey = `wv_autoResult_${key}`;
     save(autoResultKey, res, false);
     
-    // populate dragAssignments for interactive editing for both Bands
-    // Include ALL students, even if they didn't vote
-    const erstesBandDA = {};
-    const zweitesBandDA = {};
-    
+    const newDragAssignments = createEmptyBandMap();
     for (const s of students) {
-      erstesBandDA[s] = res.erstesBand.assignments[s] || "Nicht Zugeordnen";
-      zweitesBandDA[s] = res.zweitesBand.assignments[s] || "Nicht Zugeordnen";
+      activeBandIds.forEach(bandId => {
+        newDragAssignments[bandId][s] = res.bandResults[bandId]?.assignments[s] || "Nicht Zugeordnen";
+      });
     }
     
-    setDragAssignments({ erstesBand: erstesBandDA, zweitesBand: zweitesBandDA });
+    setDragAssignments(newDragAssignments);
   }
   
   // Helper function to format year/trimester in natural language
@@ -2112,7 +2234,6 @@ export default function WerkstattVerwaltungApp() {
 
   // Calculate priority score history over time for a student
   function calculatePriorityScoreHistory(student) {
-    // If student has Lernbegleitung, return array of 10s
     if (studentAssistants[student]) {
       const historyEntries = [];
       Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
@@ -2125,80 +2246,16 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const lastChanged = studentPriorityScoresLastChanged[student];
-    let startScore = lastChanged && studentPriorityScores[student] !== undefined 
+    const startScore = lastChanged && studentPriorityScores[student] !== undefined 
       ? studentPriorityScores[student] 
       : 5;
     
-    // Get all confirmed assignments sorted by timestamp
-    const historyEntries = [];
-    Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
-      if (payload.timestamp) {
-        if (!lastChanged || payload.timestamp >= lastChanged) {
-          if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
-            historyEntries.push({
-              slotKey,
-              erstesBand: payload.assignments.erstesBand?.[student],
-              zweitesBand: payload.assignments.zweitesBand?.[student],
-              timestamp: payload.timestamp
-            });
-          } else {
-            historyEntries.push({
-              slotKey,
-              erstesBand: payload.assignments?.[student],
-              zweitesBand: undefined,
-              timestamp: payload.timestamp
-            });
-          }
-        }
-      }
-    });
-    
-    historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-    
+    const historyEntries = buildPriorityHistoryEntries(student, confirmedAssignments, lastChanged);
     const scoreHistory = [];
     let currentScore = startScore;
     
     historyEntries.forEach(entry => {
-      const choicesKey = `wv_choices_${entry.slotKey}`;
-      const trimesterChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-      const erstesBandChoices = (trimesterChoices.erstesBand && trimesterChoices.erstesBand[student]) ? trimesterChoices.erstesBand[student] : [];
-      const zweitesBandChoices = (trimesterChoices.zweitesBand && trimesterChoices.zweitesBand[student]) ? trimesterChoices.zweitesBand[student] : [];
-      
-      let totalChange = 0;
-      let bandsProcessed = 0;
-      
-      if (entry.erstesBand && erstesBandChoices.length > 0 && entry.erstesBand !== 'Nicht Zugeordnet' && entry.erstesBand !== 'Nicht Zugeordnen') {
-        const gotFirstChoice = entry.erstesBand === erstesBandChoices[0];
-        const gotSecondChoice = entry.erstesBand === erstesBandChoices[1];
-        if (gotFirstChoice) {
-          totalChange -= 1;
-        } else if (gotSecondChoice) {
-          totalChange -= 1;
-        } else {
-          totalChange += erstesBandChoices.length >= 2 ? 1.5 : 1;
-        }
-        bandsProcessed++;
-      }
-      
-      if (entry.zweitesBand && zweitesBandChoices.length > 0 && entry.zweitesBand !== 'Nicht Zugeordnet' && entry.zweitesBand !== 'Nicht Zugeordnen') {
-        const gotFirstChoice = entry.zweitesBand === zweitesBandChoices[0];
-        const gotSecondChoice = entry.zweitesBand === zweitesBandChoices[1];
-        if (gotFirstChoice) {
-          totalChange -= 1;
-        } else if (gotSecondChoice) {
-          totalChange -= 1;
-        } else {
-          totalChange += zweitesBandChoices.length >= 2 ? 1.5 : 1;
-        }
-        bandsProcessed++;
-      }
-      
-      if (bandsProcessed > 0) {
-        const averageChange = totalChange / bandsProcessed;
-        currentScore += averageChange;
-        currentScore = Math.max(1, Math.min(10, currentScore));
-      }
-      
+      currentScore = applyHistoryEntryScoreChange(entry, student, currentScore, load);
       scoreHistory.push({ score: currentScore, timestamp: entry.timestamp });
     });
     
@@ -2207,104 +2264,21 @@ export default function WerkstattVerwaltungApp() {
   
   // Calculate priority score dynamically based on history
   function calculatePriorityScoreFromHistory(student) {
-    // If student has Lernbegleitung, always return 10
     if (studentAssistants[student]) {
       return 10;
     }
     
-    // Get the last manual change timestamp
     const lastChanged = studentPriorityScoresLastChanged[student];
+    let currentScore = lastChanged && studentPriorityScores[student] !== undefined
+      ? studentPriorityScores[student]
+      : 5;
     
-    // Determine starting score
-    let currentScore;
-    if (lastChanged && studentPriorityScores[student] !== undefined) {
-      // If there was a manual change, start from that manually set score
-      currentScore = studentPriorityScores[student];
-    } else {
-      // Otherwise, start from 5 (default) and process all history
-      currentScore = 5;
-    }
-    
-    // Get all confirmed assignments sorted by timestamp
-    const historyEntries = [];
-    Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
-      if (payload.timestamp) {
-        // If there was a manual change, only process entries after that change
-        // Otherwise, process all entries
-        if (!lastChanged || payload.timestamp >= lastChanged) {
-          // Check if this is a multi-Band assignment
-          if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
-            historyEntries.push({
-              slotKey,
-              erstesBand: payload.assignments.erstesBand?.[student],
-              zweitesBand: payload.assignments.zweitesBand?.[student],
-              timestamp: payload.timestamp
-            });
-          } else {
-            // Legacy single assignment format
-            historyEntries.push({
-              slotKey,
-              erstesBand: payload.assignments?.[student],
-              zweitesBand: undefined,
-              timestamp: payload.timestamp
-            });
-          }
-        }
-      }
-    });
-    
-    // Sort by timestamp (oldest first)
-    historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-    
-    // Process each history entry
+    const historyEntries = buildPriorityHistoryEntries(student, confirmedAssignments, lastChanged);
     historyEntries.forEach(entry => {
-      // Get choices for this specific trimester (using slotKey to find the choices)
-      const choicesKey = `wv_choices_${entry.slotKey}`;
-      const trimesterChoices = load(choicesKey, { erstesBand: {}, zweitesBand: {} });
-      const erstesBandChoices = (trimesterChoices.erstesBand && trimesterChoices.erstesBand[student]) ? trimesterChoices.erstesBand[student] : [];
-      const zweitesBandChoices = (trimesterChoices.zweitesBand && trimesterChoices.zweitesBand[student]) ? trimesterChoices.zweitesBand[student] : [];
-      
-      let totalChange = 0;
-      let bandsProcessed = 0;
-      
-      // Process erstesBand
-      if (entry.erstesBand && erstesBandChoices.length > 0 && entry.erstesBand !== 'Nicht Zugeordnet' && entry.erstesBand !== 'Nicht Zugeordnen') {
-        const gotFirstChoice = entry.erstesBand === erstesBandChoices[0];
-        const gotSecondChoice = entry.erstesBand === erstesBandChoices[1];
-        
-        if (gotFirstChoice) {
-          totalChange -= 1;
-        } else if (gotSecondChoice) {
-          totalChange -= 1;
-        } else {
-          totalChange += erstesBandChoices.length >= 2 ? 1.5 : 1;
-        }
-        bandsProcessed++;
-      }
-      
-      // Process zweitesBand
-      if (entry.zweitesBand && zweitesBandChoices.length > 0 && entry.zweitesBand !== 'Nicht Zugeordnet' && entry.zweitesBand !== 'Nicht Zugeordnen') {
-        const gotFirstChoice = entry.zweitesBand === zweitesBandChoices[0];
-        const gotSecondChoice = entry.zweitesBand === zweitesBandChoices[1];
-        
-        if (gotFirstChoice) {
-          totalChange -= 1;
-        } else if (gotSecondChoice) {
-          totalChange -= 1;
-        } else {
-          totalChange += zweitesBandChoices.length >= 2 ? 1.5 : 1;
-        }
-        bandsProcessed++;
-      }
-      
-      if (bandsProcessed > 0) {
-        const averageChange = totalChange / bandsProcessed;
-        currentScore += averageChange;
-        currentScore = Math.max(1, Math.min(10, currentScore));
-      }
+      currentScore = applyHistoryEntryScoreChange(entry, student, currentScore, load);
     });
     
-    return Math.round(currentScore * 10) / 10; // Round to 1 decimal place
+    return Math.round(currentScore * 10) / 10;
   }
   
 
@@ -2346,8 +2320,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
-    
-    // Create new workbook
+    const reportBandIds = getPayloadBandIds(assignmentData);
     const wb = XLSX.utils.book_new();
     
     // Group students by class
@@ -2377,19 +2350,8 @@ export default function WerkstattVerwaltungApp() {
       ];
       
       classStudents.forEach(student => {
-        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
-        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
-        
-        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
-        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
-        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
-        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
-        
-        // First row: Erstes Band
-        tableData.push([student, '1. Band', erstesBand, erstesBandRoom, erstesBandTeacher]);
-        
-        // Second row: Zweites Band (empty student name for visual grouping)
-        tableData.push(['', '2. Band', zweitesBand, zweitesBandRoom, zweitesBandTeacher]);
+        buildStudentReportRows(student, assignments, reportBandIds, workshopRooms, workshopTeachers)
+          .forEach(row => tableData.push(row));
       });
       
       // Create worksheet
@@ -2427,6 +2389,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Group students by class
     const studentsByClass = {};
@@ -2456,19 +2419,8 @@ export default function WerkstattVerwaltungApp() {
       ];
       
       classStudents.forEach(student => {
-        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
-        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
-        
-        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
-        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
-        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
-        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
-        
-        // First row: Erstes Band
-        tableData.push([student, '1. Band', erstesBand, erstesBandRoom, erstesBandTeacher]);
-        
-        // Second row: Zweites Band
-        tableData.push(['', '2. Band', zweitesBand, zweitesBandRoom, zweitesBandTeacher]);
+        buildStudentReportRows(student, assignments, reportBandIds, workshopRooms, workshopTeachers)
+          .forEach(row => tableData.push(row));
       });
       
       // Create worksheet
@@ -2503,8 +2455,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
-    
-    // Create new workbook
+    const reportBandIds = getPayloadBandIds(assignmentData);
     const wb = XLSX.utils.book_new();
     
     // Sort workshops alphabetically
@@ -2516,57 +2467,17 @@ export default function WerkstattVerwaltungApp() {
       const teacher = workshopTeachers[workshopName] || 'Nicht zugeordnet';
       const room = workshopRooms[workshopName] || 'Nicht zugeordnet';
       
-      // Get students for this workshop
-      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
+      const studentsByBand = getWorkshopStudentsByBand(assignments, workshopName, reportBandIds);
       
-      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      // Prepare data
       const tableData = [];
       
-      // Add header rows
       tableData.push([workshopName]);
       tableData.push([`Lehrkraft: ${teacher}`]);
       tableData.push([`Raum: ${room}`]);
       tableData.push([`Kapazität: ${capacity} Plätze`]);
       tableData.push([]);
       
-      // Erstes Band
-      if (erstesBandStudents.length > 0) {
-        tableData.push(['Erstes Band:']);
-        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
-        
-        erstesBandStudents.forEach(student => {
-          const className = studentClasses[student] || 'Unbekannt';
-          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-          const comment = studentComments[student] || '';
-          tableData.push([student, className, comment, needsAssistant]);
-        });
-        tableData.push([]);
-      }
-      
-      // Zweites Band
-      if (zweitesBandStudents.length > 0) {
-        tableData.push(['Zweites Band:']);
-        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
-        
-        zweitesBandStudents.forEach(student => {
-          const className = studentClasses[student] || 'Unbekannt';
-          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-          const comment = studentComments[student] || '';
-          tableData.push([student, className, comment, needsAssistant]);
-        });
-      }
-      
-      if (erstesBandStudents.length === 0 && zweitesBandStudents.length === 0) {
-        tableData.push(['Keine Schüler zugeordnet']);
-      }
+      appendWorkshopBandExcelSections(tableData, studentsByBand, reportBandIds, studentClasses, studentAssistants, studentComments);
       
       // Create worksheet
       const ws = XLSX.utils.aoa_to_sheet(tableData);
@@ -2602,6 +2513,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Sort workshops alphabetically
     const sortedWorkshops = Object.keys(workshops).sort();
@@ -2613,21 +2525,10 @@ export default function WerkstattVerwaltungApp() {
       const teacher = workshopTeachers[workshopName] || 'Nicht zugeordnet';
       const room = workshopRooms[workshopName] || 'Nicht zugeordnet';
       
-      // Get students for this workshop
-      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
+      const studentsByBand = getWorkshopStudentsByBand(assignments, workshopName, reportBandIds);
       
-      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      // Prepare data
       const tableData = [];
       
-      // Add header rows
       tableData.push([workshopName]);
       tableData.push([`${reportYearTrimester.schoolYearStart}-${reportYearTrimester.schoolYearEnd} - Trimester ${reportYearTrimester.trimester}`]);
       tableData.push([`Erstellt am: ${new Date().toLocaleDateString('de-DE')}`]);
@@ -2637,36 +2538,7 @@ export default function WerkstattVerwaltungApp() {
       tableData.push([`Kapazität: ${capacity} Plätze`]);
       tableData.push([]);
       
-      // Erstes Band
-      if (erstesBandStudents.length > 0) {
-        tableData.push(['Erstes Band:']);
-        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
-        
-        erstesBandStudents.forEach(student => {
-          const className = studentClasses[student] || 'Unbekannt';
-          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-          const comment = studentComments[student] || '';
-          tableData.push([student, className, comment, needsAssistant]);
-        });
-        tableData.push([]);
-      }
-      
-      // Zweites Band
-      if (zweitesBandStudents.length > 0) {
-        tableData.push(['Zweites Band:']);
-        tableData.push(['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']);
-        
-        zweitesBandStudents.forEach(student => {
-          const className = studentClasses[student] || 'Unbekannt';
-          const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-          const comment = studentComments[student] || '';
-          tableData.push([student, className, comment, needsAssistant]);
-        });
-      }
-      
-      if (erstesBandStudents.length === 0 && zweitesBandStudents.length === 0) {
-        tableData.push(['Keine Schüler zugeordnet']);
-      }
+      appendWorkshopBandExcelSections(tableData, studentsByBand, reportBandIds, studentClasses, studentAssistants, studentComments);
       
       // Create worksheet
       const ws = XLSX.utils.aoa_to_sheet(tableData);
@@ -2699,6 +2571,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Create new PDF document
     const doc = new jsPDF('p', 'mm', 'a4');
@@ -2761,31 +2634,8 @@ export default function WerkstattVerwaltungApp() {
       // Prepare table data - each student gets two rows (one per band)
       const tableData = [];
       classStudents.forEach(student => {
-        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
-        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
-        
-        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
-        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
-        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
-        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
-        
-        // First row: Erstes Band (with student name)
-        tableData.push([
-          student,
-          '1. Band',
-          erstesBand,
-          erstesBandRoom,
-          erstesBandTeacher
-        ]);
-        
-        // Second row: Zweites Band (without student name, empty cell for visual grouping)
-        tableData.push([
-          '', // Empty cell to show it's the same student
-          '2. Band',
-          zweitesBand,
-          zweitesBandRoom,
-          zweitesBandTeacher
-        ]);
+        buildStudentReportRows(student, assignments, reportBandIds, workshopRooms, workshopTeachers)
+          .forEach(row => tableData.push(row));
       });
       
       // Add table
@@ -2853,6 +2703,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Group students by class
     const studentsByClass = {};
@@ -2894,31 +2745,8 @@ export default function WerkstattVerwaltungApp() {
       // Prepare table data - each student gets two rows (one per band)
       const tableData = [];
       classStudents.forEach(student => {
-        const erstesBand = assignments.erstesBand?.[student] || 'Nicht zugeordnet';
-        const zweitesBand = assignments.zweitesBand?.[student] || 'Nicht zugeordnet';
-        
-        const erstesBandRoom = erstesBand !== 'Nicht zugeordnet' ? (workshopRooms[erstesBand] || 'N/A') : '-';
-        const erstesBandTeacher = erstesBand !== 'Nicht zugeordnet' ? (workshopTeachers[erstesBand] || 'N/A') : '-';
-        const zweitesBandRoom = zweitesBand !== 'Nicht zugeordnet' ? (workshopRooms[zweitesBand] || 'N/A') : '-';
-        const zweitesBandTeacher = zweitesBand !== 'Nicht zugeordnet' ? (workshopTeachers[zweitesBand] || 'N/A') : '-';
-        
-        // First row: Erstes Band (with student name)
-        tableData.push([
-          student,
-          '1. Band',
-          erstesBand,
-          erstesBandRoom,
-          erstesBandTeacher
-        ]);
-        
-        // Second row: Zweites Band (without student name, empty cell for visual grouping)
-        tableData.push([
-          '', // Empty cell to show it's the same student
-          '2. Band',
-          zweitesBand,
-          zweitesBandRoom,
-          zweitesBandTeacher
-        ]);
+        buildStudentReportRows(student, assignments, reportBandIds, workshopRooms, workshopTeachers)
+          .forEach(row => tableData.push(row));
       });
       
       // Add table
@@ -2978,6 +2806,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Create new PDF document
     const doc = new jsPDF('p', 'mm', 'a4');
@@ -3039,43 +2868,31 @@ export default function WerkstattVerwaltungApp() {
       doc.text(`Kapazität: ${capacity} Plätze`, 20, yPos);
       yPos += 10;
       
-      // Get students for this workshop, sorted alphabetically
-      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      // Students tables - separate for each band
-      if (erstesBandStudents.length > 0 || zweitesBandStudents.length > 0) {
-        // Erstes Band table
-        if (erstesBandStudents.length > 0) {
+      const studentsByBand = getWorkshopStudentsByBand(assignments, workshopName, reportBandIds);
+      const hasAnyStudents = reportBandIds.some(bandId => (studentsByBand[bandId] || []).length > 0);
+
+      if (hasAnyStudents) {
+        reportBandIds.forEach(bandId => {
+          const bandStudents = studentsByBand[bandId] || [];
+          if (bandStudents.length === 0) return;
+
           checkPageBreak(30);
           doc.setFontSize(12);
           doc.setFont(undefined, 'bold');
-          doc.text('Erstes Band:', 20, yPos);
+          doc.text(`${getBandLabel(bandId)}:`, 20, yPos);
           yPos += 8;
-          
-          const erstesBandTableData = erstesBandStudents.map(student => {
+
+          const bandTableData = bandStudents.map(student => {
             const className = studentClasses[student] || 'Unbekannt';
             const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
             const comment = studentComments[student] || '';
-            return [
-              student,
-              className,
-              comment,
-              needsAssistant
-            ];
+            return [student, className, comment, needsAssistant];
           });
-          
+
           autoTable(doc, {
             startY: yPos,
             head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
-            body: erstesBandTableData,
+            body: bandTableData,
             theme: 'striped',
             headStyles: { fillColor: [66, 139, 202], textColor: 255, fontStyle: 'bold' },
             styles: { fontSize: 8, cellPadding: 1 },
@@ -3087,48 +2904,9 @@ export default function WerkstattVerwaltungApp() {
             },
             margin: { left: 15, right: 15 }
           });
-          
+
           yPos = doc.lastAutoTable.finalY + 15;
-        }
-        
-        // Zweites Band table
-        if (zweitesBandStudents.length > 0) {
-          checkPageBreak(30);
-          doc.setFontSize(12);
-          doc.setFont(undefined, 'bold');
-          doc.text('Zweites Band:', 20, yPos);
-          yPos += 8;
-          
-          const zweitesBandTableData = zweitesBandStudents.map(student => {
-            const className = studentClasses[student] || 'Unbekannt';
-            const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-            const comment = studentComments[student] || '';
-            return [
-              student,
-              className,
-              comment,
-              needsAssistant
-            ];
-          });
-          
-          autoTable(doc, {
-            startY: yPos,
-            head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
-            body: zweitesBandTableData,
-            theme: 'striped',
-            headStyles: { fillColor: [66, 139, 202], textColor: 255, fontStyle: 'bold' },
-            styles: { fontSize: 8, cellPadding: 1 },
-            columnStyles: {
-              0: { cellWidth: 40 },
-              1: { cellWidth: 25 },
-              2: { cellWidth: 80, cellMinWidth: 80 },
-              3: { cellWidth: 25 }
-            },
-            margin: { left: 15, right: 15 }
-          });
-          
-          yPos = doc.lastAutoTable.finalY + 15;
-        }
+        });
       } else {
         doc.setFont(undefined, 'italic');
         doc.setTextColor(150, 150, 150);
@@ -3160,6 +2938,7 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const assignments = assignmentData.assignments;
+    const reportBandIds = getPayloadBandIds(assignmentData);
     
     // Sort workshops alphabetically
     const sortedWorkshops = Object.keys(workshops).sort();
@@ -3212,43 +2991,31 @@ export default function WerkstattVerwaltungApp() {
       doc.text(`Kapazität: ${capacity} Plätze`, 20, yPos);
       yPos += 10;
       
-      // Get students for this workshop, sorted alphabetically
-      const erstesBandStudents = Object.entries(assignments.erstesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      const zweitesBandStudents = Object.entries(assignments.zweitesBand || {})
-        .filter(([_, assignment]) => assignment === workshopName)
-        .map(([student, _]) => student)
-        .sort((a, b) => a.localeCompare(b));
-      
-      // Students tables - separate for each band
-      if (erstesBandStudents.length > 0 || zweitesBandStudents.length > 0) {
-        // Erstes Band table
-        if (erstesBandStudents.length > 0) {
+      const studentsByBand = getWorkshopStudentsByBand(assignments, workshopName, reportBandIds);
+      const hasAnyStudents = reportBandIds.some(bandId => (studentsByBand[bandId] || []).length > 0);
+
+      if (hasAnyStudents) {
+        reportBandIds.forEach(bandId => {
+          const bandStudents = studentsByBand[bandId] || [];
+          if (bandStudents.length === 0) return;
+
           checkPageBreak(30);
           doc.setFontSize(12);
           doc.setFont(undefined, 'bold');
-          doc.text('Erstes Band:', 20, yPos);
+          doc.text(`${getBandLabel(bandId)}:`, 20, yPos);
           yPos += 8;
-          
-          const erstesBandTableData = erstesBandStudents.map(student => {
+
+          const bandTableData = bandStudents.map(student => {
             const className = studentClasses[student] || 'Unbekannt';
             const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
             const comment = studentComments[student] || '';
-            return [
-              student,
-              className,
-              comment,
-              needsAssistant
-            ];
+            return [student, className, comment, needsAssistant];
           });
-          
+
           autoTable(doc, {
             startY: yPos,
             head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
-            body: erstesBandTableData,
+            body: bandTableData,
             theme: 'striped',
             headStyles: { fillColor: [66, 139, 202], textColor: 255, fontStyle: 'bold' },
             styles: { fontSize: 8, cellPadding: 1 },
@@ -3260,46 +3027,9 @@ export default function WerkstattVerwaltungApp() {
             },
             margin: { left: 15, right: 15 }
           });
-          
+
           yPos = doc.lastAutoTable.finalY + 15;
-        }
-        
-        // Zweites Band table
-        if (zweitesBandStudents.length > 0) {
-          checkPageBreak(30);
-          doc.setFontSize(12);
-          doc.setFont(undefined, 'bold');
-          doc.text('Zweites Band:', 20, yPos);
-          yPos += 8;
-          
-          const zweitesBandTableData = zweitesBandStudents.map(student => {
-            const className = studentClasses[student] || 'Unbekannt';
-            const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
-            const comment = studentComments[student] || '';
-            return [
-              student,
-              className,
-              comment,
-              needsAssistant
-            ];
-          });
-          
-          autoTable(doc, {
-            startY: yPos,
-            head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
-            body: zweitesBandTableData,
-            theme: 'striped',
-            headStyles: { fillColor: [66, 139, 202], textColor: 255, fontStyle: 'bold' },
-            styles: { fontSize: 8, cellPadding: 1 },
-            columnStyles: {
-              0: { cellWidth: 40 },
-              1: { cellWidth: 25 },
-              2: { cellWidth: 80, cellMinWidth: 80 },
-              3: { cellWidth: 25 }
-            },
-            margin: { left: 15, right: 15 }
-          });
-        }
+        });
       } else {
         doc.setFont(undefined, 'italic');
         doc.setTextColor(150, 150, 150);
@@ -3414,64 +3144,47 @@ export default function WerkstattVerwaltungApp() {
 
   // Drag-and-drop helpers
   function canAssign(student, workshopName, band) {
-    // Check if workshop is available in this band
     if (!isWorkshopAvailableInBand(workshops, workshopName, band)) {
-      return { ok: false, reason: `Diese Werkstatt ist in ${band === 'erstesBand' ? 'Erstes' : 'Zweites'} Band nicht verfügbar.` };
+      return { ok: false, reason: `Diese Werkstatt ist in ${getBandLabel(band)} nicht verfügbar.` };
     }
     
-    // Check "cannot be parallel" constraint
-    const otherBand = band === 'erstesBand' ? 'zweitesBand' : 'erstesBand';
-    const otherBandAssignment = dragAssignments[otherBand]?.[student];
-    if (otherBandAssignment) {
-      // Check if the other band assignment has this workshop in its "cannot be parallel" list
+    for (const otherBandId of activeBandIds) {
+      if (otherBandId === band) continue;
+      const otherBandAssignment = dragAssignments[otherBandId]?.[student];
+      if (!otherBandAssignment || isNotAssigned(otherBandAssignment)) continue;
+
+      if (otherBandAssignment === workshopName) {
+        return { ok: false, reason: `Konflikt: Bereits in ${getBandLabel(otherBandId)} zugeordnet.` };
+      }
+
       const otherBandCannotBeParallel = cannotBeParallel[otherBandAssignment] || [];
       if (otherBandCannotBeParallel.includes(workshopName)) {
-        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${otherBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band) belegt werden.` };
+        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${getBandLabel(otherBandId)}) belegt werden.` };
       }
-      // Check if this workshop has the other band assignment in its "cannot be parallel" list
       const thisWorkshopCannotBeParallel = cannotBeParallel[workshopName] || [];
       if (thisWorkshopCannotBeParallel.includes(otherBandAssignment)) {
-        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${otherBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band) belegt werden.` };
+        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${getBandLabel(otherBandId)}) belegt werden.` };
       }
     }
     
-    // Check capacity
     const counts = getCurrentWorkshopCounts();
     const capacity = getWorkshopCapacity(workshops[workshopName], workshopName);
     if ((counts[workshopName] ?? 0) >= capacity) {
       return { ok: false, reason: `Kapazität erreicht (${counts[workshopName]}/${capacity})` };
     }
-    // Check previous assignment rule: don't assign if same as last year
     const last = prevAssignments[student];
     if (last && last === workshopName) {
       return { ok: false, reason: `Schüler hatte diese Werkstatt bereits letztes Jahr (${last}).` };
     }
-    // Check prerequisites
     if (!hasPrereqs(student, workshopName, prevAssignments, prereqs)) {
       return { ok: false, reason: `Voraussetzungen für ${workshopName} nicht erfüllt.` };
     }
 
-    // Check Folgekurs rules
     const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, band);
     if (requiredFolgekurs) {
-      // Check if the rule is already fulfilled in the current assignments
-      const currentAssignments = dragAssignments;
-      const erstesBandAssignment = currentAssignments.erstesBand?.[student];
-      const zweitesBandAssignment = currentAssignments.zweitesBand?.[student];
-      
-      // Check if rule is already fulfilled
-      let isFulfilled = false;
+      const isFulfilled = isFolgekursFulfilled(requiredFolgekurs, dragAssignments, student, activeBandIds);
       if (requiredFolgekurs.band !== null) {
-        // sameBand is required - check only the same band
-        if (requiredFolgekurs.band === 'erstesBand' && erstesBandAssignment === requiredFolgekurs.course) {
-          isFulfilled = true;
-        } else if (requiredFolgekurs.band === 'zweitesBand' && zweitesBandAssignment === requiredFolgekurs.course) {
-          isFulfilled = true;
-        }
-        
-        // If sameBand is required, check this specific band
         if (requiredFolgekurs.band === band) {
-          // This is the band where the rule applies
           if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
             const prevKey = getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
             return { 
@@ -3479,30 +3192,18 @@ export default function WerkstattVerwaltungApp() {
               reason: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${prevKey} einen Kurs belegt, der diese Regel auslöst).` 
             };
           }
-        } else {
-          // This is NOT the required band, but student is trying to assign the required course here
-          // This is wrong - they should assign it in the required band
-          if (workshopName === requiredFolgekurs.course) {
-            return { 
-              ok: false, 
-              reason: `Folgekurs-Regel: ${requiredFolgekurs.course} muss im ${requiredFolgekurs.band === 'erstesBand' ? 'Ersten' : 'Zweiten'} Band belegt werden (gleiches Band wie im vorherigen Trimester erforderlich).` 
-            };
-          }
-        }
-      } else {
-        // sameBand is not required - check both bands
-        if (erstesBandAssignment === requiredFolgekurs.course || zweitesBandAssignment === requiredFolgekurs.course) {
-          isFulfilled = true;
-        }
-        
-        // Only warn if rule is not fulfilled and student is trying to assign something else
-        if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
-          const prevKey = getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+        } else if (workshopName === requiredFolgekurs.course) {
           return { 
             ok: false, 
-            reason: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${prevKey} einen Kurs belegt, der diese Regel auslöst).` 
+            reason: `Folgekurs-Regel: ${requiredFolgekurs.course} muss im ${getBandLabel(requiredFolgekurs.band)} belegt werden (gleiches Band wie im vorherigen Trimester erforderlich).` 
           };
         }
+      } else if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
+        const prevKey = getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+        return { 
+          ok: false, 
+          reason: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${prevKey} einen Kurs belegt, der diese Regel auslöst).` 
+        };
       }
     }
 
@@ -3561,14 +3262,16 @@ export default function WerkstattVerwaltungApp() {
     const student = e.dataTransfer.getData('text/plain');
     if (!student) return;
     
-    // Check for conflict with other band
-    const otherBand = activeBand === 'erstesBand' ? 'zweitesBand' : 'erstesBand';
-    const otherBandAssignment = dragAssignments[otherBand]?.[student];
-    if (otherBandAssignment === workshopName && workshopName !== 'Nicht Zugeordnet') {
+    const conflictBand = activeBandIds.find(otherBandId => {
+      if (otherBandId === activeBand) return false;
+      const otherAssignment = dragAssignments[otherBandId]?.[student];
+      return otherAssignment === workshopName && !isNotAssigned(workshopName);
+    });
+    if (conflictBand) {
       setDragHover({ 
         workshop: workshopName, 
         invalid: true, 
-        message: `Konflikt: Bereits in ${otherBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band zugeordnet` 
+        message: `Konflikt: Bereits in ${getBandLabel(conflictBand)} zugeordnet` 
       });
       return;
     }
@@ -3594,11 +3297,13 @@ export default function WerkstattVerwaltungApp() {
     const student = e.dataTransfer.getData('text/plain');
     if (!student) return;
     
-    // Check if this would create a conflict (same workshop in both bands)
-    const otherBand = activeBand === 'erstesBand' ? 'zweitesBand' : 'erstesBand';
-    const otherBandAssignment = dragAssignments[otherBand]?.[student];
-    if (otherBandAssignment === workshopName && workshopName !== 'Nicht Zugeordnet' && workshopName !== 'Nicht Zugeordnen') {
-      const errorMsg = `Kann nicht zugeordnet werden: ${student} ist bereits in ${otherBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band ${workshopName} zugeordnet.`;
+    const conflictBand = activeBandIds.find(otherBandId => {
+      if (otherBandId === activeBand) return false;
+      const otherAssignment = dragAssignments[otherBandId]?.[student];
+      return otherAssignment === workshopName && !isNotAssigned(workshopName);
+    });
+    if (conflictBand) {
+      const errorMsg = `Kann nicht zugeordnet werden: ${student} ist bereits in ${getBandLabel(conflictBand)} ${workshopName} zugeordnet.`;
       setDropViolations(prev => ({ ...prev, [workshopName]: errorMsg }));
       setTimeout(() => setDropViolations(prev => {
         const copy = { ...prev };
@@ -3796,16 +3501,14 @@ export default function WerkstattVerwaltungApp() {
         payload[key] = { 
           assignments: updatedAssignments, 
           timestamp: new Date().toISOString(),
-          bands: ['erstesBand', 'zweitesBand']
+          bands: activeBandIds
         };
         save(LS_KEYS.assignments, payload);
         setConfirmedAssignments(payload);
         
-        // Export to CSV by school year/trimester
-        exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatedAssignments);
+        exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatedAssignments, activeBandIds);
         
-        // Update priority scores based on assignment results
-        updatePriorityScores(updatedAssignments, uploadedChoices);
+        updatePriorityScores(updatedAssignments, uploadedChoices, activeBandIds);
       }, 100);
       
       // Return updated state
@@ -3847,31 +3550,27 @@ export default function WerkstattVerwaltungApp() {
       ...prev,
       [name]: {
         capacity: Number(cap || 0),
-        availableBands: ['erstesBand', 'zweitesBand'] // Default: available in both bands
+        availableBands: [...ALL_BAND_IDS]
       }
     }));
   }
   // Check if a workshop has been taken by any student
   function hasWorkshopBeenTaken(workshopName) {
-    // Check in confirmedAssignments
     for (const [, payload] of Object.entries(confirmedAssignments)) {
       if (payload.assignments) {
-        // Check both bands
-        const erstesBand = payload.assignments.erstesBand || {};
-        const zweitesBand = payload.assignments.zweitesBand || {};
-        if (Object.values(erstesBand).includes(workshopName) || Object.values(zweitesBand).includes(workshopName)) {
-          return true;
+        const bandIds = getPayloadBandIds(payload);
+        for (const bandId of bandIds) {
+          if (Object.values(payload.assignments[bandId] || {}).includes(workshopName)) {
+            return true;
+          }
         }
-        // Check legacy format
-        const legacyAssignments = payload.assignments;
-        if (typeof legacyAssignments === 'object' && !legacyAssignments.erstesBand) {
-          if (Object.values(legacyAssignments).includes(workshopName)) {
+        if (isLegacySingleBandAssignments(payload.assignments)) {
+          if (Object.values(payload.assignments).includes(workshopName)) {
             return true;
           }
         }
       }
     }
-    // Check in prevAssignments
     for (const student in prevAssignments) {
       const prev = prevAssignments[student];
       if (Array.isArray(prev) && prev.includes(workshopName)) {
@@ -3880,11 +3579,10 @@ export default function WerkstattVerwaltungApp() {
         return true;
       }
     }
-    // Check in current dragAssignments
-    const erstesBand = dragAssignments.erstesBand || {};
-    const zweitesBand = dragAssignments.zweitesBand || {};
-    if (Object.values(erstesBand).includes(workshopName) || Object.values(zweitesBand).includes(workshopName)) {
-      return true;
+    for (const bandId of ALL_BAND_IDS) {
+      if (Object.values(dragAssignments[bandId] || {}).includes(workshopName)) {
+        return true;
+      }
     }
     return false;
   }
@@ -4307,28 +4005,17 @@ export default function WerkstattVerwaltungApp() {
 
   // Check for students assigned to same workshop in both bands
   function getStudentsWithSameWorkshopInBothBands() {
-    const erstesBand = dragAssignments.erstesBand || {};
-    const zweitesBand = dragAssignments.zweitesBand || {};
     const conflicts = [];
-
-    Object.keys(erstesBand).forEach(student => {
-      const firstBandWorkshop = erstesBand[student];
-      const secondBandWorkshop = zweitesBand[student];
-      
-      if (firstBandWorkshop && 
-          secondBandWorkshop && 
-          firstBandWorkshop !== 'Nicht Zugeordnet' && 
-          firstBandWorkshop !== 'Nicht Zugeordnen' &&
-          secondBandWorkshop !== 'Nicht Zugeordnet' && 
-          secondBandWorkshop !== 'Nicht Zugeordnen' &&
-          firstBandWorkshop === secondBandWorkshop) {
-        conflicts.push({
-          student,
-          workshop: firstBandWorkshop
-        });
+    students.forEach(student => {
+      const workshopsByBand = activeBandIds
+        .map(bandId => dragAssignments[bandId]?.[student])
+        .filter(w => w && !isNotAssigned(w));
+      const unique = new Set(workshopsByBand);
+      if (workshopsByBand.length > unique.size) {
+        const duplicate = workshopsByBand.find((w, i) => workshopsByBand.indexOf(w) !== i);
+        conflicts.push({ student, workshop: duplicate });
       }
     });
-
     return conflicts;
   }
 
@@ -4341,24 +4028,15 @@ export default function WerkstattVerwaltungApp() {
 
   // Check for students with same first choice in both bands
   function getStudentsWithSameFirstChoiceInBothBands() {
-    const erstesBandChoices = getChoicesForBand('erstesBand');
-    const zweitesBandChoices = getChoicesForBand('zweitesBand');
     const conflicts = [];
-
     students.forEach(student => {
-      const firstBandFirstChoice = erstesBandChoices[student]?.[0];
-      const secondBandFirstChoice = zweitesBandChoices[student]?.[0];
-      
-      if (firstBandFirstChoice && 
-          secondBandFirstChoice && 
-          firstBandFirstChoice === secondBandFirstChoice) {
-        conflicts.push({
-          student,
-          workshop: firstBandFirstChoice
-        });
+      const firstChoices = activeBandIds
+        .map(bandId => getChoicesForBand(bandId)[student]?.[0])
+        .filter(Boolean);
+      if (firstChoices.length >= 2 && new Set(firstChoices).size < firstChoices.length) {
+        conflicts.push({ student, workshop: firstChoices[0] });
       }
     });
-
     return conflicts;
   }
 
@@ -4374,25 +4052,24 @@ export default function WerkstattVerwaltungApp() {
   function buildHistoryForStudent(student) {
     const history = [];
     Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
-      // Check if this is a multi-Band assignment
-      if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
-        const erstesBandAssigned = payload.assignments.erstesBand && payload.assignments.erstesBand[student] ? payload.assignments.erstesBand[student] : 'Nicht Zugeordnet';
-        const zweitesBandAssigned = payload.assignments.zweitesBand && payload.assignments.zweitesBand[student] ? payload.assignments.zweitesBand[student] : 'Nicht Zugeordnet';
-        history.push({ 
-          slotKey, 
-          assigned: `${erstesBandAssigned} / ${zweitesBandAssigned}`, 
+      if (isMultiBandPayload(payload)) {
+        const bandIds = getPayloadBandIds(payload);
+        const bandAssignments = bandIds.map(bandId =>
+          payload.assignments[bandId]?.[student] || 'Nicht Zugeordnet'
+        );
+        history.push({
+          slotKey,
+          assigned: bandAssignments.join(' / '),
           timestamp: payload.timestamp,
-          erstesBand: erstesBandAssigned,
-          zweitesBand: zweitesBandAssigned
+          bandIds,
+          bandAssignments,
         });
       } else {
-        // Legacy single assignment format
-        const assigned = payload.assignments && payload.assignments[student] ? payload.assignments[student] : 'Nicht Zugeordnet';
+        const assigned = payload.assignments?.[student] || 'Nicht Zugeordnet';
         history.push({ slotKey, assigned, timestamp: payload.timestamp });
       }
     });
-    // sort by slotKey descending (simple heuristic: later years first if keys like 2025-T1)
-    history.sort((a,b) => (a.slotKey < b.slotKey ? 1 : -1));
+    history.sort((a, b) => (a.slotKey < b.slotKey ? 1 : -1));
     return history;
   }
 
@@ -4977,33 +4654,22 @@ export default function WerkstattVerwaltungApp() {
 
                     <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
                       <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Regelverstöße (Wahlen)</h3>
-                      <div className="detail-content">
-                        <div className="mb-4">
-                          <h4 className="font-semibold text-sm mb-2 text-blue-700">Erstes Band:</h4>
-                          {getChoicesForBand('erstesBand')[selectedStudent] ? (
-                            <ul className="space-y-1">
-                              {checkViolationsForStudent(selectedStudent, getChoicesForBand('erstesBand')[selectedStudent]).map((i, idx) => (
-                                <li key={idx} className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">{i}</li>
-                              ))}
-                              {checkViolationsForStudent(selectedStudent, getChoicesForBand('erstesBand')[selectedStudent]).length===0 && (
-                                <li className="p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">Keine Auffälligkeiten</li>
-                              )}
-                            </ul>
-                          ) : <div className="text-gray-500 italic p-2 bg-gray-50 rounded">Keine Wahl-Daten geladen.</div>}
-                        </div>
-                        <div>
-                          <h4 className="font-semibold text-sm mb-2 text-blue-700">Zweites Band:</h4>
-                          {getChoicesForBand('zweitesBand')[selectedStudent] ? (
-                            <ul className="space-y-1">
-                              {checkViolationsForStudent(selectedStudent, getChoicesForBand('zweitesBand')[selectedStudent]).map((i, idx) => (
-                                <li key={idx} className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">{i}</li>
-                              ))}
-                              {checkViolationsForStudent(selectedStudent, getChoicesForBand('zweitesBand')[selectedStudent]).length===0 && (
-                                <li className="p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">Keine Auffälligkeiten</li>
-                              )}
-                            </ul>
-                          ) : <div className="text-gray-500 italic p-2 bg-gray-50 rounded">Keine Wahl-Daten geladen.</div>}
-                        </div>
+                      <div className="detail-content space-y-4">
+                        {ALL_BAND_IDS.map(bandId => (
+                          <div key={bandId}>
+                            <h4 className="font-semibold text-sm mb-2 text-blue-700">{getBandLabel(bandId)}:</h4>
+                            {getChoicesForBand(bandId)[selectedStudent] ? (
+                              <ul className="space-y-1">
+                                {checkViolationsForStudent(selectedStudent, getChoicesForBand(bandId)[selectedStudent]).map((i, idx) => (
+                                  <li key={idx} className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">{i}</li>
+                                ))}
+                                {checkViolationsForStudent(selectedStudent, getChoicesForBand(bandId)[selectedStudent]).length === 0 && (
+                                  <li className="p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">Keine Auffälligkeiten</li>
+                                )}
+                              </ul>
+                            ) : <div className="text-gray-500 italic p-2 bg-gray-50 rounded">Keine Wahl-Daten geladen.</div>}
+                          </div>
+                        ))}
                       </div>
                     </div>
 
@@ -5011,34 +4677,22 @@ export default function WerkstattVerwaltungApp() {
                       <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Vergangene Wahlen</h3>
                       <div className="detail-content">
                         <div className="space-y-4">
-                          <div>
-                            <h4 className="font-semibold text-sm mb-2 text-blue-700">Erstes Band:</h4>
-                            {getChoicesForBand('erstesBand')[selectedStudent] ? (
-                              <div className="space-y-1">
-                                {getChoicesForBand('erstesBand')[selectedStudent].map((choice, idx) => (
-                                  <div key={idx} className="p-2 bg-blue-50 border border-blue-200 rounded text-sm">
-                                    <span className="font-medium">{idx + 1}. Wahl:</span> {choice}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="text-gray-500 italic p-2 bg-gray-50 rounded text-sm">Keine Wahlen geladen.</div>
-                            )}
-                          </div>
-                          <div>
-                            <h4 className="font-semibold text-sm mb-2 text-purple-700">Zweites Band:</h4>
-                            {getChoicesForBand('zweitesBand')[selectedStudent] ? (
-                              <div className="space-y-1">
-                                {getChoicesForBand('zweitesBand')[selectedStudent].map((choice, idx) => (
-                                  <div key={idx} className="p-2 bg-purple-50 border border-purple-200 rounded text-sm">
-                                    <span className="font-medium">{idx + 1}. Wahl:</span> {choice}
-                                  </div>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="text-gray-500 italic p-2 bg-gray-50 rounded text-sm">Keine Wahlen geladen.</div>
-                            )}
-                          </div>
+                          {ALL_BAND_IDS.map(bandId => (
+                            <div key={bandId}>
+                              <h4 className="font-semibold text-sm mb-2 text-blue-700">{getBandLabel(bandId)}:</h4>
+                              {getChoicesForBand(bandId)[selectedStudent] ? (
+                                <div className="space-y-1">
+                                  {getChoicesForBand(bandId)[selectedStudent].map((choice, idx) => (
+                                    <div key={idx} className="p-2 bg-blue-50 border border-blue-200 rounded text-sm">
+                                      <span className="font-medium">{idx + 1}. Wahl:</span> {choice}
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <div className="text-gray-500 italic p-2 bg-gray-50 rounded text-sm">Keine Wahlen geladen.</div>
+                              )}
+                            </div>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -5067,27 +4721,40 @@ export default function WerkstattVerwaltungApp() {
   <section className="wahl-tab space-y-8 w-full">
     {/* --- BAND SELECTION TABS --- */}
     <div className="bg-white rounded-2xl shadow p-5">
-      <div className="flex space-x-2 mb-6">
-        <button
-          onClick={() => setActiveBand('erstesBand')}
-          className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
-            activeBand === 'erstesBand'
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-          }`}
-        >
-          Erstes Band
-        </button>
-        <button
-          onClick={() => setActiveBand('zweitesBand')}
-          className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
-            activeBand === 'zweitesBand'
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-          }`}
-        >
-          Zweites Band
-        </button>
+      <div className="flex flex-wrap items-center gap-4 mb-4">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-gray-700">Anzahl Bänder:</span>
+          <select
+            value={activeBandCount}
+            onChange={(e) => {
+              const count = Number(e.target.value);
+              setActiveBandCount(count);
+              if (!getBandIds(count).includes(activeBand)) {
+                setActiveBand(getBandIds(count)[0]);
+              }
+            }}
+            className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white"
+          >
+            {Array.from({ length: MAX_BANDS - 1 }, (_, i) => i + 2).map(n => (
+              <option key={n} value={n}>{n} Bänder</option>
+            ))}
+          </select>
+        </div>
+      </div>
+      <div className="flex flex-wrap gap-2 mb-6">
+        {activeBandIds.map(bandId => (
+          <button
+            key={bandId}
+            onClick={() => setActiveBand(bandId)}
+            className={`px-4 py-2 rounded-lg font-semibold transition-all duration-200 shadow-sm text-sm ${
+              activeBand === bandId
+                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
+                : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+            }`}
+          >
+            {getBandLabel(bandId)}
+          </button>
+        ))}
       </div>
 
       {/* --- TRIMESTER SELECTION --- */}
@@ -5123,7 +4790,7 @@ export default function WerkstattVerwaltungApp() {
         {/* Wahl Upload */}
         <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6 shadow-sm border border-gray-200">
           <h3 className="text-lg font-semibold mb-4 text-gray-800 border-b border-gray-300 pb-2">
-            Wahl-Daten ({activeBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band)
+            Wahl-Daten ({getBandLabel(activeBand)})
           </h3>
 
           {!Object.keys(getChoicesForBand(activeBand)).length && (
@@ -5192,26 +4859,28 @@ export default function WerkstattVerwaltungApp() {
 
           <div className="mb-4 flex flex-wrap gap-3">
             <div className="flex flex-col gap-3">
-              <label className="px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200 cursor-pointer text-center">
-              <input
-                  ref={fileInputRefBand1}
-                type="file"
-                  accept=".csv,.xlsx,.xls"
-                  onChange={(e) => handleFileUpload(e, 'erstesBand')}
-                className="hidden"
-              />
-                📁 Erstes Band hochladen (CSV/XLSX)
-            </label>
-              <label className="px-4 py-2 bg-gradient-to-r from-purple-500 to-purple-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-purple-600 hover:to-purple-700 hover:shadow-md transition-all duration-200 cursor-pointer text-center">
-                <input
-                  ref={fileInputRefBand2}
-                  type="file"
-                  accept=".csv,.xlsx,.xls"
-                  onChange={(e) => handleFileUpload(e, 'zweitesBand')}
-                  className="hidden"
-                />
-                📁 Zweites Band hochladen (CSV/XLSX)
-              </label>
+              {activeBandIds.map((bandId, idx) => {
+                const colors = [
+                  'from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700',
+                  'from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700',
+                  'from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700',
+                  'from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700',
+                  'from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700',
+                  'from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700',
+                ];
+                return (
+                  <label key={bandId} className={`px-4 py-2 bg-gradient-to-r ${colors[idx % colors.length]} text-white text-sm font-medium rounded-lg shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer text-center`}>
+                    <input
+                      ref={el => { fileInputRefs.current[bandId] = el; }}
+                      type="file"
+                      accept=".csv,.xlsx,.xls"
+                      onChange={(e) => handleFileUpload(e, bandId)}
+                      className="hidden"
+                    />
+                    📁 {getBandLabel(bandId)} hochladen (CSV/XLSX)
+                  </label>
+                );
+              })}
             </div>
             <button 
               onClick={runAutoAssign} 
@@ -5384,7 +5053,7 @@ export default function WerkstattVerwaltungApp() {
             </>
           )}
           
-          {!autoResult && (Object.keys(dragAssignments.erstesBand).length === 0 && Object.keys(dragAssignments.zweitesBand).length === 0) && (
+          {!autoResult && !hasAnyAssignmentInBands(dragAssignments, activeBandIds) && (
             <div className="text-gray-500 italic text-sm">
               Noch keine automatische Zuordnung durchgeführt.
             </div>
@@ -5396,7 +5065,7 @@ export default function WerkstattVerwaltungApp() {
       <div className="mt-6 bg-gradient-to-br from-purple-50 to-violet-100 rounded-xl p-6 shadow-sm border border-purple-200">
         <div className="flex items-center justify-between mb-4 border-b border-purple-300 pb-2">
           <h3 className="text-lg font-semibold text-purple-900">
-            Manuelle Anpassung ({activeBand === 'erstesBand' ? 'Erstes' : 'Zweites'} Band)
+            Manuelle Anpassung ({getBandLabel(activeBand)})
           </h3>
           {/* Student Search */}
           <div className="flex items-center gap-2">
@@ -6036,35 +5705,23 @@ export default function WerkstattVerwaltungApp() {
                         <div className="text-sm text-gray-600 mb-2">Kapazität: <span className="font-semibold text-blue-600">{cap}</span></div>
                         <div className="text-sm text-gray-600 mb-2">
                           <label className="block mb-1">Verfügbar in:</label>
-                          <div className="flex gap-3">
-                            <label className="flex items-center gap-2 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={availableBands.includes('erstesBand')}
-                                onChange={(e) => {
-                                  const newBands = e.target.checked
-                                    ? [...availableBands.filter(b => b !== 'erstesBand'), 'erstesBand']
-                                    : availableBands.filter(b => b !== 'erstesBand');
-                                  updateWorkshopAvailableBands(name, newBands.length > 0 ? newBands : ['zweitesBand']);
-                                }}
-                                className="w-4 h-4 text-blue-600"
-                              />
-                              <span>Erstes Band</span>
-                            </label>
-                            <label className="flex items-center gap-2 cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={availableBands.includes('zweitesBand')}
-                                onChange={(e) => {
-                                  const newBands = e.target.checked
-                                    ? [...availableBands.filter(b => b !== 'zweitesBand'), 'zweitesBand']
-                                    : availableBands.filter(b => b !== 'zweitesBand');
-                                  updateWorkshopAvailableBands(name, newBands.length > 0 ? newBands : ['erstesBand']);
-                                }}
-                                className="w-4 h-4 text-blue-600"
-                              />
-                              <span>Zweites Band</span>
-                            </label>
+                          <div className="flex flex-wrap gap-3">
+                            {BANDS.map(band => (
+                              <label key={band.id} className="flex items-center gap-2 cursor-pointer">
+                                <input
+                                  type="checkbox"
+                                  checked={availableBands.includes(band.id)}
+                                  onChange={(e) => {
+                                    const newBands = e.target.checked
+                                      ? [...availableBands.filter(b => b !== band.id), band.id]
+                                      : availableBands.filter(b => b !== band.id);
+                                    updateWorkshopAvailableBands(name, newBands.length > 0 ? newBands : [ALL_BAND_IDS.find(id => id !== band.id)]);
+                                  }}
+                                  className="w-4 h-4 text-blue-600"
+                                />
+                                <span>{band.label}</span>
+                              </label>
+                            ))}
                           </div>
                         </div>
                         <div className="text-sm text-gray-600 mb-2">
@@ -6648,35 +6305,47 @@ function CreateRuleForm({ workshops, onAdd }) {
 // NEW: StudentHistoryTable – shows confirmedAssignments for a given student and allows inline edit
 function StudentHistoryTable({ student, confirmedAssignments, workshops, onChangeAssignment, archivedWorkshops = {} }) {
   const slots = Object.entries(confirmedAssignments).map(([slotKey, payload]) => {
-    // Check if this is a multi-Band assignment
-    if (payload.bands && payload.bands.includes('erstesBand') && payload.bands.includes('zweitesBand')) {
-      const erstesBandAssigned = payload.assignments.erstesBand && payload.assignments.erstesBand[student] ? payload.assignments.erstesBand[student] : 'Nicht Zugeordnet';
-      const zweitesBandAssigned = payload.assignments.zweitesBand && payload.assignments.zweitesBand[student] ? payload.assignments.zweitesBand[student] : 'Nicht Zugeordnet';
-      return { 
-        slotKey, 
-        timestamp: payload.timestamp, 
-        assigned: `${erstesBandAssigned} / ${zweitesBandAssigned}`,
-        erstesBand: erstesBandAssigned,
-        zweitesBand: zweitesBandAssigned,
-        isMultiBand: true
-      };
-    } else {
-      // Legacy single assignment format
-      return { 
-        slotKey, 
-        timestamp: payload.timestamp, 
-        assigned: payload.assignments ? payload.assignments[student] || 'Nicht Zugeordnet' : 'Nicht Zugeordnet',
-        isMultiBand: false
-      };
+    if (isMultiBandPayload(payload)) {
+      const bandIds = getPayloadBandIds(payload);
+      const bandAssignments = {};
+      bandIds.forEach(bandId => {
+        bandAssignments[bandId] = payload.assignments[bandId]?.[student] || 'Nicht Zugeordnet';
+      });
+      return { slotKey, timestamp: payload.timestamp, bandIds, bandAssignments, isMultiBand: true };
     }
+    return {
+      slotKey,
+      timestamp: payload.timestamp,
+      assigned: payload.assignments?.[student] || 'Nicht Zugeordnet',
+      isMultiBand: false,
+    };
   });
-  
-  // sort descending by slotKey
-  slots.sort((a,b)=> a.slotKey < b.slotKey ? 1 : -1);
+
+  slots.sort((a, b) => (a.slotKey < b.slotKey ? 1 : -1));
+
+  const displayBandIds = ALL_BAND_IDS.slice(
+    0,
+    Math.max(DEFAULT_BAND_COUNT, ...slots.filter(s => s.isMultiBand).map(s => s.bandIds.length))
+  );
 
   if (slots.length === 0) return (
     <div className="text-gray-500 italic p-4 bg-gray-50 rounded-lg text-center">
       Keine historischen Zuordnungen verfügbar.
+    </div>
+  );
+
+  const renderAssignmentBadge = (workshop) => (
+    <div className="flex items-center gap-2">
+      <div className={`px-2 py-1 rounded text-xs font-medium ${
+        workshop === 'Nicht Zugeordnet' ? 'bg-gray-100 text-gray-600' :
+        archivedWorkshops[workshop] ? 'bg-gray-200 text-gray-700 opacity-75' :
+        'bg-blue-100 text-blue-800'
+      }`}>
+        {workshop}
+      </div>
+      {archivedWorkshops[workshop] && (
+        <span className="text-xs text-gray-500" title="Archivierte Werkstatt">📦</span>
+      )}
     </div>
   );
 
@@ -6686,8 +6355,9 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
         <thead className="bg-gradient-to-r from-gray-50 to-gray-100">
           <tr>
             <th className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">Jahr-Trimester</th>
-            <th className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">Erstes Band</th>
-            <th className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">Zweites Band</th>
+            {displayBandIds.map(bandId => (
+              <th key={bandId} className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">{getBandLabel(bandId)}</th>
+            ))}
             <th className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">Bearbeiten</th>
             <th className="px-4 py-3 text-left font-semibold text-gray-800 border-b border-gray-200">Letzte Änderung</th>
           </tr>
@@ -6698,90 +6368,43 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
               <td className="px-4 py-3 border-b border-gray-100">
                 <div className="font-semibold text-blue-700">{s.slotKey}</div>
               </td>
-              <td className="px-4 py-3 border-b border-gray-100">
-                {s.isMultiBand ? (
-                  <div className="flex items-center gap-2">
-                    <div className={`px-2 py-1 rounded text-xs font-medium ${
-                      s.erstesBand === 'Nicht Zugeordnet' ? 'bg-gray-100 text-gray-600' : 
-                      archivedWorkshops[s.erstesBand] ? 'bg-gray-200 text-gray-700 opacity-75' : 
-                      'bg-blue-100 text-blue-800'
-                    }`}>
-                      {s.erstesBand}
-                    </div>
-                    {archivedWorkshops[s.erstesBand] && (
-                      <span className="text-xs text-gray-500" title="Archivierte Werkstatt">📦</span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2">
-                    <div className={`px-2 py-1 rounded text-xs font-medium ${
-                      s.assigned === 'Nicht Zugeordnet' ? 'bg-gray-100 text-gray-600' : 
-                      archivedWorkshops[s.assigned] ? 'bg-gray-200 text-gray-700 opacity-75' : 
-                      'bg-blue-100 text-blue-800'
-                    }`}>
-                      {s.assigned || 'Nicht Zugeordnet'}
-                    </div>
-                    {archivedWorkshops[s.assigned] && (
-                      <span className="text-xs text-gray-500" title="Archivierte Werkstatt">📦</span>
-                    )}
-                  </div>
-                )}
-              </td>
-              <td className="px-4 py-3 border-b border-gray-100">
-                {s.isMultiBand ? (
-                  <div className="flex items-center gap-2">
-                    <div className={`px-2 py-1 rounded text-xs font-medium ${
-                      s.zweitesBand === 'Nicht Zugeordnet' ? 'bg-gray-100 text-gray-600' : 
-                      archivedWorkshops[s.zweitesBand] ? 'bg-gray-200 text-gray-700 opacity-75' : 
-                      'bg-green-100 text-green-800'
-                    }`}>
-                      {s.zweitesBand}
-                    </div>
-                    {archivedWorkshops[s.zweitesBand] && (
-                      <span className="text-xs text-gray-500" title="Archivierte Werkstatt">📦</span>
-                    )}
-                  </div>
-                ) : (
-                  <div className="text-gray-400 text-xs">—</div>
-                )}
-              </td>
+              {displayBandIds.map(bandId => (
+                <td key={bandId} className="px-4 py-3 border-b border-gray-100">
+                  {s.isMultiBand ? (
+                    renderAssignmentBadge(s.bandAssignments[bandId] || 'Nicht Zugeordnet')
+                  ) : (
+                    bandId === displayBandIds[0]
+                      ? renderAssignmentBadge(s.assigned)
+                      : <div className="text-gray-400 text-xs">—</div>
+                  )}
+                </td>
+              ))}
               <td className="px-4 py-3 border-b border-gray-100">
                 {s.isMultiBand ? (
                   <div className="space-y-2">
-                    <div>
-                      <div className="text-xs text-gray-600 mb-1 font-medium">Erstes Band:</div>
-                      <select 
-                        value={s.erstesBand} 
-                        onChange={(e)=>onChangeAssignment(s.slotKey, student, e.target.value, 'erstesBand')} 
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                      >
-                        <option value={'Nicht Zugeordnet'}>Nicht Zugeordnet</option>
-                        {workshops.map(w => (
-                          <option key={w} value={w}>{w}</option>
-                        ))}
-                      </select>
-                    </div>
-                    <div>
-                      <div className="text-xs text-gray-600 mb-1 font-medium">Zweites Band:</div>
-                      <select 
-                        value={s.zweitesBand} 
-                        onChange={(e)=>onChangeAssignment(s.slotKey, student, e.target.value, 'zweitesBand')} 
-                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-green-500 focus:border-transparent transition-all duration-200"
-                      >
-                        <option value={'Nicht Zugeordnet'}>Nicht Zugeordnet</option>
-                        {workshops.map(w => (
-                          <option key={w} value={w}>{w}</option>
-                        ))}
-                      </select>
-                    </div>
+                    {s.bandIds.map(bandId => (
+                      <div key={bandId}>
+                        <div className="text-xs text-gray-600 mb-1 font-medium">{getBandLabel(bandId)}:</div>
+                        <select
+                          value={s.bandAssignments[bandId]}
+                          onChange={(e) => onChangeAssignment(s.slotKey, student, e.target.value, bandId)}
+                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                        >
+                          <option value="Nicht Zugeordnet">Nicht Zugeordnet</option>
+                          {workshops.map(w => (
+                            <option key={w} value={w}>{w}</option>
+                          ))}
+                        </select>
+                      </div>
+                    ))}
                   </div>
                 ) : (
-                  <select 
-                    value={s.assigned} 
-                    onChange={(e)=>onChangeAssignment(s.slotKey, student, e.target.value)} 
+                  <select
+                    value={s.assigned}
+                    onChange={(e) => onChangeAssignment(s.slotKey, student, e.target.value)}
                     className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
                   >
-                    <option value={'Nicht Zugeordnet'}>Nicht Zugeordnet</option>
+                    <option value="Nicht Zugeordnet">Nicht Zugeordnet</option>
                     {workshops.map(w => (
                       <option key={w} value={w}>{w}</option>
                     ))}
