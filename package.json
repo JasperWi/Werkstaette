@@ -41,8 +41,6 @@
     "electron-build": "npm run build && electron-builder",
     "dist": "npm run build && electron-builder",
     "generate-icons": "node generate-icons.js",
-    "generate-demo-zip": "node scripts/generate-demo-zip.js",
-    "generate-decade-demo-zip": "node scripts/generate-decade-demo-zip.js",
     "predeploy": "npm run build",
     "deploy": "gh-pages -d build"
   },

@@ -23,6 +23,8 @@ body {
   align-items: center;
   justify-content: space-between;
   margin-bottom: 32px;
+  padding-bottom: 16px;
+  border-bottom: 2px solid #e2e8f0;
 }
 
 .app-title {
@@ -34,11 +36,7 @@ body {
 
 .nav-buttons {
   display: flex;
-  flex-wrap: wrap;
-  align-items: center;
   gap: 8px;
-  flex: 1;
-  justify-content: flex-end;
 }
 
 .nav-button {
@@ -64,114 +62,10 @@ body {
 /* Sections */
 .section {
   background: white;
-  border-radius: 16px;
-  border: 2px solid #94a3b8;
-  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
   padding: 24px;
   margin-bottom: 24px;
-}
-
-/* Same framed cards as the trimester view, with a border that stays visible. */
-.app-container .bg-white.rounded-xl,
-.app-container .bg-white.rounded-2xl,
-.app-container .bg-white.rounded-lg.shadow,
-.app-container .bg-white.rounded-lg.shadow-sm,
-.app-container .bg-white.rounded-lg.shadow-md,
-.app-container .bg-white.rounded-lg.shadow-lg {
-  border-width: 2px;
-  border-style: solid;
-}
-
-.app-container [class*="rounded-xl"][class*="bg-gradient-to"],
-.app-container [class*="rounded-2xl"][class*="bg-gradient-to"] {
-  border-width: 2px;
-  border-style: solid;
-}
-
-/* Other tabs use the trimester palette: slate structure, teal actions, amber for open work, red for danger. */
-.app-container [class*="from-green-50"],
-.app-container [class*="from-emerald-50"],
-.app-container [class*="from-blue-50"],
-.app-container [class*="from-indigo-50"],
-.app-container [class*="from-purple-50"],
-.app-container [class*="from-violet"],
-.app-container [class*="from-gray-50"],
-.app-container [class*="to-emerald-50"],
-.app-container [class*="to-amber-50"] {
-  background-image: none !important;
-  background-color: #f8fafc !important;
-  border-color: #64748b !important;
-  border-width: 2px !important;
-  border-style: solid !important;
-}
-
-.app-container [class*="from-orange-50"] {
-  background-image: none !important;
-  background-color: #fff7ed !important;
-  border-color: #c2410c !important;
-  border-width: 2px !important;
-  border-style: solid !important;
-}
-
-.app-container [class*="from-red-50"],
-.app-container [class*="to-rose-100"],
-.app-container [class*="from-red-100"] {
-  background-image: none !important;
-  background-color: #fef2f2 !important;
-  border-color: #b91c1c !important;
-}
-
-.app-container button[class*="from-green-"],
-.app-container button[class*="from-blue-"],
-.app-container button[class*="from-indigo-"],
-.app-container button[class*="from-emerald-"],
-.app-container button[class*="from-orange-5"],
-.app-container button[class*="from-orange-6"],
-.app-container button[class*="from-purple-"],
-.app-container button[class*="bg-blue-6"],
-.app-container button[class*="bg-indigo-6"],
-.app-container button[class*="bg-green-6"],
-.app-container button[class*="bg-emerald-6"],
-.app-container button[class*="bg-purple-6"],
-.app-container label[class*="bg-blue-6"],
-.app-container label[class*="bg-green-6"],
-.app-container label[class*="bg-indigo-6"] {
-  background-image: none !important;
-  background-color: #0f766e !important;
-  color: #fff !important;
-  border: 2px solid #115e59 !important;
-}
-
-.app-container [class*="rounded-full"][class*="bg-indigo-6"] {
-  background-color: #0f766e !important;
-}
-
-.app-container [class*="from-indigo-500"],
-.app-container [class*="from-indigo-600"],
-.app-container [class*="to-purple-600"] {
-  background-image: none !important;
-  background-color: #0f766e !important;
-}
-
-.app-container [class*="from-blue-200"] {
-  background-image: none !important;
-  background-color: #ccfbf1 !important;
-  border-color: #0f766e !important;
-}
-
-.app-container [class*="text-green-9"],
-.app-container [class*="text-emerald-9"],
-.app-container [class*="text-blue-9"],
-.app-container [class*="text-indigo-9"],
-.app-container [class*="text-purple-9"],
-.app-container [class*="text-green-8"],
-.app-container [class*="text-blue-8"],
-.app-container [class*="text-purple-8"],
-.app-container [class*="text-emerald-7"],
-.app-container [class*="text-purple-7"],
-.app-container [class*="text-blue-600"],
-.app-container [class*="text-indigo-700"] {
-  color: #134e4a !important;
 }
 
 /* Students Tab */
