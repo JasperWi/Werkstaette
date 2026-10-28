@@ -8,21 +8,11 @@ import {
   getTrimesterDataPhase,
   getBandDataPhase,
 } from '../studentFlowHelpers';
-import { getPlanBandIds } from '../trimesterPlans';
-
-const BAND_LABEL = {
-  erstesBand: '1. Band',
-  zweitesBand: '2. Band',
-  drittesBand: '3. Band',
-  viertesBand: '4. Band',
-  fuenftesBand: '5. Band',
-  sechstesBand: '6. Band',
-};
-
-const ALL_BAND_ORDER = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
+import { getPlanBandIds, bandNumberFromId, bandShortLabel } from '../trimesterPlans';
 
 function bandIndex(bandId) {
-  return ALL_BAND_ORDER.indexOf(bandId);
+  const number = bandNumberFromId(bandId);
+  return number == null ? -1 : number - 1;
 }
 
 function countNoun(n, singular, plural) {
@@ -117,7 +107,7 @@ const ADD_W = 116;
 const PAD_Y = 18;
 
 function bandTitle(plan, bandId) {
-  const base = BAND_LABEL[bandId] || 'Band';
+  const base = bandShortLabel(bandId);
   const custom = plan.bandSubtitles?.[bandId]?.trim();
   return custom && custom !== base ? `${base} (${custom})` : base;
 }

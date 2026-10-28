@@ -14,6 +14,13 @@ import {
   isWorkshopOfferedInBand,
   plansAsSortedList,
   getTrimesterWahlCount,
+  parseTrimesterSlotKey,
+  bandIdsForCount,
+  bandNumberFromId,
+  bandShortLabel,
+  isBandId,
+  bandIdsInObject,
+  MAX_BAND_COUNT,
 } from "./trimesterPlans";
 import { isStudentExpectedToVoteOnBand } from "./studentFlowHelpers";
 
@@ -52,22 +59,20 @@ const BANDS = [
   { id: 'fuenftesBand', label: 'Fünftes Band', shortLabel: '5. Band', number: 5 },
   { id: 'sechstesBand', label: 'Sechstes Band', shortLabel: '6. Band', number: 6 },
 ];
-const MAX_BANDS = BANDS.length;
 const DEFAULT_BAND_COUNT = 2;
 const ALL_BAND_IDS = BANDS.map(b => b.id);
 const DEFAULT_BAND_IDS = ALL_BAND_IDS.slice(0, DEFAULT_BAND_COUNT);
 
 function getBandIds(count = DEFAULT_BAND_COUNT) {
-  const n = Math.min(Math.max(1, count || DEFAULT_BAND_COUNT), MAX_BANDS);
-  return ALL_BAND_IDS.slice(0, n);
+  return bandIdsForCount(count || DEFAULT_BAND_COUNT);
 }
 
 function getBandLabel(bandId) {
-  return BANDS.find(b => b.id === bandId)?.label || bandId;
+  return BANDS.find(b => b.id === bandId)?.label || bandShortLabel(bandId);
 }
 
 function getBandShortLabel(bandId) {
-  return BANDS.find(b => b.id === bandId)?.shortLabel || bandId;
+  return BANDS.find(b => b.id === bandId)?.shortLabel || bandShortLabel(bandId);
 }
 
 function createEmptyBandMap() {
@@ -92,21 +97,21 @@ function createStudentBandAssignments(studentList, bandIds = DEFAULT_BAND_IDS) {
 
 function isLegacySingleBandAssignments(assignments) {
   if (!assignments || typeof assignments !== 'object') return false;
-  return !ALL_BAND_IDS.some(id => assignments[id] !== undefined && typeof assignments[id] === 'object');
+  return !bandIdsInObject(assignments).some(id => assignments[id] !== undefined && typeof assignments[id] === 'object');
 }
 
 function isMultiBandPayload(payload) {
   if (!payload?.assignments) return false;
   if (Array.isArray(payload.bands) && payload.bands.length > 0) return true;
-  return ALL_BAND_IDS.some(id => payload.assignments[id] && typeof payload.assignments[id] === 'object');
+  return bandIdsInObject(payload.assignments).some(id => payload.assignments[id] && typeof payload.assignments[id] === 'object');
 }
 
 function getPayloadBandIds(payload) {
   if (payload?.bands && Array.isArray(payload.bands) && payload.bands.length > 0) {
-    return payload.bands.filter(id => ALL_BAND_IDS.includes(id));
+    return payload.bands.filter(isBandId).sort((a, b) => bandNumberFromId(a) - bandNumberFromId(b));
   }
   if (payload?.assignments) {
-    const found = ALL_BAND_IDS.filter(id =>
+    const found = bandIdsInObject(payload.assignments).filter(id =>
       payload.assignments[id] && typeof payload.assignments[id] === 'object'
     );
     if (found.length > 0) return found;
@@ -120,11 +125,15 @@ function getPayloadBandIds(payload) {
 function normalizeBandDataObject(data) {
   const normalized = createEmptyBandMap();
   if (!data) return normalized;
-  ALL_BAND_IDS.forEach(id => {
+  const ids = new Set([...ALL_BAND_IDS, ...bandIdsInObject(data)]);
+  ids.forEach(id => {
     if (data[id] && typeof data[id] === 'object') {
       normalized[id] = { ...data[id] };
     }
   });
+  if (data.__classes && typeof data.__classes === 'object') {
+    normalized.__classes = data.__classes;
+  }
   return normalized;
 }
 
@@ -143,7 +152,8 @@ function hasAnyAssignmentInBands(assignments, bandIds) {
 }
 
 function hasAnyChoicesInBands(choices, bandIds) {
-  return bandIds.some(bandId => Object.keys(choices[bandId] || {}).length > 0);
+  const ids = new Set([...(bandIds || []), ...bandIdsInObject(choices)]);
+  return [...ids].some(bandId => Object.keys(choices?.[bandId] || {}).length > 0);
 }
 
 function getAssignmentCsvHeaders(bandIds = DEFAULT_BAND_IDS) {
@@ -236,7 +246,9 @@ function isWorkshopAvailableInBand(workshops, workshopName, band) {
   const workshop = workshops[workshopName];
   if (!workshop) return false;
   const availableBands = getWorkshopAvailableBands(workshop, workshopName);
-  return availableBands.includes(band);
+  if (availableBands.includes(band)) return true;
+  const number = bandNumberFromId(band);
+  return number != null && number > ALL_BAND_IDS.length && availableBands.includes(ALL_BAND_IDS[ALL_BAND_IDS.length - 1]);
 }
 
 function normalizeWorkshopData(workshops) {
@@ -1191,20 +1203,12 @@ async function importDataFromZIP(file) {
             normalized === b.label.toLowerCase().replace(/\s/g, '') ||
             normalized === b.label.toLowerCase().replace(/\s/g, '').replace('ä', 'ae').replace('ü', 'ue').replace('ö', 'oe')
           );
+          const numbered = normalized.match(/^(\d+)\.?band$/) || normalized.match(/^band(\d+)$/);
           if (matchedBand) {
             bandColumns.push({ idx, bandId: matchedBand.id });
-          } else if (normalized === 'erstesband' || normalized === '1.band') {
-            bandColumns.push({ idx, bandId: 'erstesBand' });
-          } else if (normalized === 'zweitesband' || normalized === '2.band') {
-            bandColumns.push({ idx, bandId: 'zweitesBand' });
-          } else if (normalized === 'drittesband' || normalized === '3.band') {
-            bandColumns.push({ idx, bandId: 'drittesBand' });
-          } else if (normalized === 'viertesband' || normalized === '4.band') {
-            bandColumns.push({ idx, bandId: 'viertesBand' });
-          } else if (normalized === 'fuenftesband' || normalized === '5.band') {
-            bandColumns.push({ idx, bandId: 'fuenftesBand' });
-          } else if (normalized === 'sechstesband' || normalized === '6.band') {
-            bandColumns.push({ idx, bandId: 'sechstesBand' });
+          } else if (numbered) {
+            const bandId = bandIdsForCount(Number(numbered[1]))[Number(numbered[1]) - 1];
+            if (bandId) bandColumns.push({ idx, bandId });
           }
         });
 
@@ -1408,6 +1412,78 @@ function inferEinschulungsjahrFromWahlClass(schoolYearStart, className, entryStu
   const yearsSinceEntry = stufe - entryStufe;
   if (yearsSinceEntry < 0) return null;
   return Number(schoolYearStart) - yearsSinceEntry;
+}
+
+function classOnChoices(choices, student) {
+  const classes = choices?.__classes;
+  if (!classes || typeof classes !== 'object') return '';
+  for (const bandId of Object.keys(classes)) {
+    const name = String(classes[bandId]?.[student] || '').trim();
+    if (name) return name;
+  }
+  return '';
+}
+
+function classOnUploadInfo(info, trimesterKey) {
+  const uploads = Array.isArray(info?.uploads) ? info.uploads : [];
+  const match = uploads.filter(entry => entry?.trimesterKey === trimesterKey && String(entry.className || '').trim());
+  if (match.length) return String(match[match.length - 1].className).trim();
+  if (info?.trimesterKey === trimesterKey && String(info.className || '').trim()) return String(info.className).trim();
+  return '';
+}
+
+function studentHasParticipation(payload, choices, student) {
+  if (payload?.assignments) {
+    if (isLegacySingleBandAssignments(payload.assignments)) {
+      const value = payload.assignments[student];
+      if (value && !isNotAssigned(value)) return true;
+    }
+    if (getPayloadBandIds(payload).some(bandId => {
+      const value = payload.assignments[bandId]?.[student];
+      return value && !isNotAssigned(value);
+    })) return true;
+  }
+  return bandIdsInObject(choices).some(bandId => {
+    const row = choices[bandId]?.[student];
+    return Array.isArray(row) ? row.some(Boolean) : Boolean(row);
+  });
+}
+
+function fillMissingEnrollmentYearsFromParticipation({ students, enrollmentYears, assignments, choicesBySlot, classUploadInfo }) {
+  const next = { ...(enrollmentYears || {}) };
+  let filled = 0;
+  (students || []).forEach(student => {
+    if (getStudentEinschulungsjahr(student, next) != null) return;
+    const events = new Map();
+    const add = (key, choices) => {
+      const slot = parseTrimesterSlotKey(key);
+      if (!slot) return;
+      const payload = assignments?.[key] || assignments?.[slot.canonicalKey] || assignments?.[slot.rawKey];
+      const choiceMap = choices || choicesBySlot?.[slot.canonicalKey] || choicesBySlot?.[slot.rawKey] || choicesBySlot?.[key];
+      if (!studentHasParticipation(payload, choiceMap, student)) return;
+      const existing = events.get(slot.canonicalKey);
+      if (existing) {
+        if (choices) existing.choices = choices;
+        return;
+      }
+      events.set(slot.canonicalKey, { slot, choices: choiceMap });
+    };
+    Object.keys(assignments || {}).forEach(key => add(key, null));
+    Object.entries(choicesBySlot || {}).forEach(([key, choices]) => add(key, choices));
+    const ordered = [...events.values()].sort((a, b) => (b.slot.schoolYearStart - a.slot.schoolYearStart) || (b.slot.trimester - a.slot.trimester));
+    for (const event of ordered) {
+      const className = classOnChoices(event.choices, student)
+        || classOnUploadInfo(classUploadInfo?.[student], event.slot.canonicalKey)
+        || classOnUploadInfo(classUploadInfo?.[student], event.slot.rawKey);
+      if (!className) continue;
+      const year = inferEinschulungsjahrFromWahlClass(event.slot.schoolYearStart, className);
+      if (year == null) continue;
+      next[student] = year;
+      filled += 1;
+      break;
+    }
+  });
+  return { years: next, filled };
 }
 
 function normalizeRuleKlassenStufen(raw) {
@@ -4064,7 +4140,19 @@ export default function WerkstattVerwaltungApp() {
       if (importedData[LS_KEYS.studentTrimesters]) setStudentTrimesters(importedData[LS_KEYS.studentTrimesters]);
       if (importedData[LS_KEYS.studentAssistants]) setStudentAssistants(importedData[LS_KEYS.studentAssistants]);
       if (importedData[LS_KEYS.studentClasses]) setStudentClasses(importedData[LS_KEYS.studentClasses]);
-      if (importedData[LS_KEYS.studentEnrollmentYears]) setStudentEnrollmentYears(importedData[LS_KEYS.studentEnrollmentYears]);
+      const rawChoicesBySlot = {};
+      Object.keys(importedData).forEach(key => {
+        if (key.startsWith('wv_choices_')) rawChoicesBySlot[key.replace('wv_choices_', '')] = importedData[key];
+      });
+      const importedStudents = importedData[LS_KEYS.students] || [];
+      const { years: enrollmentYears, filled: filledEnrollmentYears } = fillMissingEnrollmentYearsFromParticipation({
+        students: importedStudents,
+        enrollmentYears: importedData[LS_KEYS.studentEnrollmentYears] || {},
+        assignments: importedData.assignments || {},
+        choicesBySlot: rawChoicesBySlot,
+        classUploadInfo: importedData[LS_KEYS.studentClassUploadInfo] || {},
+      });
+      setStudentEnrollmentYears(enrollmentYears);
       if (importedData[LS_KEYS.classRegistry]) setClassRegistry(importedData[LS_KEYS.classRegistry]);
       if (importedData[LS_KEYS.klassenStufenPool]) setKlassenStufenPool(importedData[LS_KEYS.klassenStufenPool]);
       if (importedData[LS_KEYS.studentClassUploadInfo]) setStudentClassUploadInfo(importedData[LS_KEYS.studentClassUploadInfo]);
@@ -4115,10 +4203,13 @@ export default function WerkstattVerwaltungApp() {
       save(LS_KEYS.trimesterPlans, mergedPlans, false);
 
       const inferredOnly = !importedData[LS_KEYS.trimesterPlans];
+      const enrollmentNote = filledEnrollmentYears > 0
+        ? ` Für ${filledEnrollmentYears} Schüler ohne Einschulungsjahr wurde der Jahrgang aus dem letzten Trimester mit Klasse gesetzt.`
+        : '';
       alert(
-        inferredOnly
+        (inferredOnly
           ? 'Daten importiert. Trimester-Pläne wurden aus Zuordnungen/Wahl-CSVs ergänzt (älteres ZIP ohne trimester-plans.json).'
-          : 'Daten wurden erfolgreich importiert (inkl. Trimester-Konfiguration).'
+          : 'Daten wurden erfolgreich importiert (inkl. Trimester-Konfiguration).') + enrollmentNote
       );
       
       // Reset file input
@@ -6059,6 +6150,7 @@ export default function WerkstattVerwaltungApp() {
                               <strong>Sitzenbleiben:</strong> Bleibt ein Schüler in derselben Klassenstufe hängen, wird{' '}
                               <strong>kein neues</strong> Einschulungsjahr vergeben — der Jahrgang bleibt für Regeln unverändert.
                               Spätere Uploads ändern einen bereits gesetzten Wert nicht (nur manuell hier).
+                              Ein ZIP, das alle Daten ersetzt, setzt fehlende Jahrgänge aus dem letzten Trimester, in dem der Schüler schon mit einer Klasse vorkommt.
                             </p>
                           </div>
                         )}
@@ -6424,21 +6516,21 @@ export default function WerkstattVerwaltungApp() {
           ) : (
             <label className="flex items-center gap-2 text-sm text-gray-700">
               <span className="font-medium whitespace-nowrap">Parallel-Bänder:</span>
-              <select
+              <input
+                type="number"
+                min={1}
+                max={MAX_BAND_COUNT}
                 value={activeBandCount}
                 onChange={(e) => {
                   const count = Number(e.target.value);
+                  if (!Number.isFinite(count) || count < 1) return;
                   setActiveBandCount(count);
                   if (!getBandIds(count).includes(activeBand)) {
                     setActiveBand(getBandIds(count)[0]);
                   }
                 }}
-                className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white"
-              >
-                {Array.from({ length: MAX_BANDS - 1 }, (_, i) => i + 2).map(n => (
-                  <option key={n} value={n}>{n}</option>
-                ))}
-              </select>
+                className="w-20 px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white"
+              />
             </label>
           )}
           <button
@@ -8563,8 +8655,7 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
 
   slots.sort((a, b) => (a.slotKey < b.slotKey ? 1 : -1));
 
-  const displayBandIds = ALL_BAND_IDS.slice(
-    0,
+  const displayBandIds = getBandIds(
     Math.max(DEFAULT_BAND_COUNT, ...slots.filter(s => s.isMultiBand).map(s => s.bandIds.length))
   );
 

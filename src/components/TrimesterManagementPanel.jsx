@@ -5,6 +5,8 @@ import {
   getPlanBandIds,
   jahrgangColor,
   trimesterPlanKey,
+  bandShortLabel,
+  MAX_BAND_COUNT,
 } from '../trimesterPlans';
 import StudentFlowView from './StudentFlowView';
 
@@ -16,28 +18,19 @@ function jahrgangForStufe(schoolYearStart, stufe) {
   return Number.isFinite(year) ? year : null;
 }
 
-const ALL_BAND_META = [
-  { id: 'erstesBand', label: '1. Band', num: 1 },
-  { id: 'zweitesBand', label: '2. Band', num: 2 },
-  { id: 'drittesBand', label: '3. Band', num: 3 },
-  { id: 'viertesBand', label: '4. Band', num: 4 },
-  { id: 'fuenftesBand', label: '5. Band', num: 5 },
-  { id: 'sechstesBand', label: '6. Band', num: 6 },
-];
-
 function BandChip({ bandId, active, color, onClick }) {
-  const meta = ALL_BAND_META.find(b => b.id === bandId);
+  const label = bandShortLabel(bandId);
   return (
     <button
       type="button"
-      title={meta?.label}
+      title={label}
       onClick={onClick}
       className={`px-2.5 py-1 rounded-lg text-xs font-semibold border transition-all ${
         active ? 'ring-2 ring-offset-1 ring-indigo-400 text-white border-transparent' : 'bg-white text-gray-700 border-gray-300 hover:border-indigo-300'
       }`}
       style={active && color ? { backgroundColor: color } : active ? { backgroundColor: '#4f46e5' } : undefined}
     >
-      {meta?.label || bandId}
+      {label}
     </button>
   );
 }
@@ -72,7 +65,7 @@ function TrimesterEditor({
       if (!stufenBandAccess[stufe]) stufenBandAccess[stufe] = [...newIds];
       else stufenBandAccess[stufe] = stufenBandAccess[stufe].filter(id => newIds.includes(id));
     });
-    updatePlan({ bandCount: count, stufenBandAccess });
+    updatePlan({ bandCount: newIds.length, stufenBandAccess });
   };
 
   const toggleStufeBand = (stufe, bandId) => {
@@ -158,15 +151,18 @@ function TrimesterEditor({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Anzahl Parallel-Bänder</label>
-            <select
+            <input
+              type="number"
+              min={1}
+              max={MAX_BAND_COUNT}
               value={plan.bandCount}
-              onChange={e => setBandCount(Number(e.target.value))}
+              onChange={e => {
+                const count = Number(e.target.value);
+                if (!Number.isFinite(count) || count < 1) return;
+                setBandCount(count);
+              }}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
-            >
-              {[1, 2, 3, 4, 5, 6].map(n => (
-                <option key={n} value={n}>{n}</option>
-              ))}
-            </select>
+            />
           </div>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Wahlen pro Schüler</label>
@@ -204,7 +200,7 @@ function TrimesterEditor({
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
           {bandIds.map(bandId => (
             <label key={bandId} className="text-sm">
-              <span className="text-gray-600 block mb-1">{ALL_BAND_META.find(b => b.id === bandId)?.label}</span>
+              <span className="text-gray-600 block mb-1">{bandShortLabel(bandId)}</span>
               <input
                 type="text"
                 value={enriched.bandSubtitles?.[bandId] || ''}
@@ -230,7 +226,7 @@ function TrimesterEditor({
               <tr className="text-left text-gray-500 border-b">
                 <th className="py-2 pr-4">Stufe</th>
                 {bandIds.map(id => (
-                  <th key={id} className="py-2 px-2 text-center">{ALL_BAND_META.find(b => b.id === id)?.label}</th>
+                  <th key={id} className="py-2 px-2 text-center">{bandShortLabel(id)}</th>
                 ))}
               </tr>
             </thead>
@@ -423,7 +419,7 @@ function removeBandFromCourse(course, bandId) {
 }
 
 function bandLabel(bandId) {
-  return ALL_BAND_META.find(band => band.id === bandId)?.label || bandId;
+  return bandShortLabel(bandId);
 }
 
 function joinBands(ids) {

@@ -1,10 +1,12 @@
-import { getPlanBandIds, getTrimesterWahlCount, parseClassLetter, jahrgangColor } from './trimesterPlans';
+import { getPlanBandIds, getTrimesterWahlCount, parseClassLetter, jahrgangColor, bandIdsInObject } from './trimesterPlans';
 
 const ENTRY_STUFE = 5;
 const TRIMESTERS_PER_YEAR = 3;
 const ESTIMATED_BANDS_PER_JAHRGANG = 2;
 
-const ALL_BAND_IDS = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
+function assignmentsUseBandMaps(assignments) {
+  return bandIdsInObject(assignments).some(id => assignments[id] && typeof assignments[id] === 'object');
+}
 
 function isNotAssigned(val) {
   return !val || val === 'Nicht Zugeordnet' || String(val).trim() === '';
@@ -21,9 +23,7 @@ export function getTrimesterDataPhase(plan, confirmedAssignments, loadChoicesFor
   const payload = confirmedAssignments?.[plan.key];
   if (payload?.assignments && typeof payload.assignments === 'object') {
     const bandIds = getPlanBandIds(plan);
-    const hasBandObjects = ALL_BAND_IDS.some(
-      id => payload.assignments[id] && typeof payload.assignments[id] === 'object'
-    );
+    const hasBandObjects = assignmentsUseBandMaps(payload.assignments);
     if (hasBandObjects) {
       hasAssignments = bandIds.some(bid => {
         const map = payload.assignments[bid];
@@ -67,9 +67,7 @@ export function getBandDataPhase(plan, bandId, confirmedAssignments, loadChoices
   if (bandMap && typeof bandMap === 'object' && !Array.isArray(bandMap)) {
     hasAssignments = Object.values(bandMap).some(value => !isNotAssigned(value));
   } else if (payload?.assignments && typeof payload.assignments === 'object') {
-    const hasBandObjects = ALL_BAND_IDS.some(
-      id => payload.assignments[id] && typeof payload.assignments[id] === 'object'
-    );
+    const hasBandObjects = assignmentsUseBandMaps(payload.assignments);
     if (!hasBandObjects) {
       hasAssignments = Object.values(payload.assignments).some(
         value => typeof value === 'string' && !isNotAssigned(value)
@@ -132,9 +130,7 @@ function coursesAssignedOnPlan(student, plan, confirmedAssignments) {
   if (!payload?.assignments || !plan) return [];
   const bandIds = getPlanBandIds(plan);
   const names = [];
-  const hasBandObjects = ALL_BAND_IDS.some(
-    id => payload.assignments[id] && typeof payload.assignments[id] === 'object'
-  );
+  const hasBandObjects = assignmentsUseBandMaps(payload.assignments);
   if (hasBandObjects) {
     bandIds.forEach(bandId => {
       const course = payload.assignments[bandId]?.[student];
@@ -165,11 +161,9 @@ function flattenWorkshopsFromAssignments(student, confirmedAssignments) {
   const workshops = [];
   Object.values(confirmedAssignments || {}).forEach(payload => {
     if (!payload?.assignments) return;
-    const hasBandObjects = ALL_BAND_IDS.some(
-      id => payload.assignments[id] && typeof payload.assignments[id] === 'object'
-    );
+    const hasBandObjects = assignmentsUseBandMaps(payload.assignments);
     if (hasBandObjects) {
-      ALL_BAND_IDS.forEach(bandId => {
+      bandIdsInObject(payload.assignments).forEach(bandId => {
         const course = payload.assignments[bandId]?.[student];
         if (course && !isNotAssigned(course)) workshops.push(course);
       });

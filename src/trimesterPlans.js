@@ -36,11 +36,52 @@ export function getTrimesterWahlCount(plan) {
   return clampWahlCount(plan?.wahlCount ?? DEFAULT_WAHL_COUNT);
 }
 
+const NAMED_BAND_IDS = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
+export const MAX_BAND_COUNT = 30;
+
+export function bandNumberFromId(bandId) {
+  const named = NAMED_BAND_IDS.indexOf(bandId);
+  if (named >= 0) return named + 1;
+  const match = String(bandId || '').match(/^band(\d+)$/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return number >= 1 ? number : null;
+}
+
+export function isBandId(bandId) {
+  return bandNumberFromId(bandId) != null;
+}
+
+export function bandIdForNumber(number) {
+  const n = Number(number);
+  if (n >= 1 && n <= NAMED_BAND_IDS.length) return NAMED_BAND_IDS[n - 1];
+  return `band${n}`;
+}
+
+export function clampBandCount(count) {
+  const n = Math.floor(Number(count));
+  if (!Number.isFinite(n)) return 2;
+  return Math.min(MAX_BAND_COUNT, Math.max(1, n));
+}
+
+export function bandIdsForCount(count) {
+  const n = clampBandCount(count);
+  return Array.from({ length: n }, (_, index) => bandIdForNumber(index + 1));
+}
+
+export function bandShortLabel(bandId) {
+  const number = bandNumberFromId(bandId);
+  return number ? `${number}. Band` : String(bandId || 'Band');
+}
+
+export function bandIdsInObject(data) {
+  return Object.keys(data || {})
+    .filter(isBandId)
+    .sort((a, b) => bandNumberFromId(a) - bandNumberFromId(b));
+}
+
 export function createTrimesterPlan({ schoolYearStart, schoolYearEnd, trimester, bandCount = 2, klassenStufenPool = [] }) {
-  const bandIds = Array.from({ length: Math.min(Math.max(1, bandCount), 6) }, (_, i) => {
-    const ids = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
-    return ids[i];
-  });
+  const bandIds = bandIdsForCount(bandCount);
   const stufenBandAccess = {};
   klassenStufenPool.forEach(stufe => {
     stufenBandAccess[stufe] = [...bandIds];
@@ -100,9 +141,7 @@ export function groupPlansBySchoolYear(plansMap) {
 }
 
 export function getPlanBandIds(plan) {
-  const n = Math.min(Math.max(1, plan?.bandCount || 2), 6);
-  const all = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
-  return all.slice(0, n);
+  return bandIdsForCount(plan?.bandCount || 2);
 }
 
 function keepCourseVariants(entry, fallbackBandIds) {
@@ -286,18 +325,11 @@ export function parseTrimesterSlotKey(key) {
 }
 
 export function inferBandCountFromAssignmentPayload(payload) {
-  if (payload?.bands?.length) return Math.min(6, payload.bands.length);
-  const asg = payload?.assignments;
-  if (!asg || typeof asg !== 'object') return 2;
-  const ids = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand'];
-  let max = 0;
-  ids.forEach((id, idx) => {
-    const bandMap = asg[id];
-    if (bandMap && typeof bandMap === 'object' && Object.keys(bandMap).length > 0) {
-      max = idx + 1;
-    }
-  });
-  return max || 2;
+  const listed = (payload?.bands || []).map(bandNumberFromId).filter(number => number != null);
+  if (listed.length) return clampBandCount(Math.max(...listed));
+  const present = bandIdsInObject(payload?.assignments).map(bandNumberFromId);
+  if (!present.length) return 2;
+  return clampBandCount(Math.max(...present));
 }
 
 export function inferWahlCountFromChoices(choicesByBand) {
