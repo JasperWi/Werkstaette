@@ -196,26 +196,6 @@ function computeBandStatistics(assignments, choices, bandIds) {
   };
 }
 
-function applyPriorityScoreChangeForStudent(assignments, choices, bandIds, student, currentScore) {
-  let totalChange = 0;
-  let bandsProcessed = 0;
-
-  bandIds.forEach(bandId => {
-    const assigned = assignments[bandId]?.[student];
-    const studentChoices = choices[bandId]?.[student] || [];
-    const change = processPriorityChangeForBand(assigned, studentChoices);
-    if (change !== null) {
-      totalChange += change;
-      bandsProcessed++;
-    }
-  });
-
-  if (bandsProcessed === 0) return currentScore;
-  const averageChange = totalChange / bandsProcessed;
-  const newScore = currentScore + averageChange;
-  return Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
-}
-
 function processPriorityChangeForBand(assigned, studentChoices) {
   if (studentChoices.length === 0 || !assigned || isNotAssigned(assigned)) {
     return null;
@@ -336,20 +316,6 @@ function computePriorityScoreFromFullHistory(student, confirmedAssignments, load
     score = applyHistoryEntryScoreChange(entry, student, score, loadFn);
   });
   return Math.round(score * 10) / 10;
-}
-
-function computePriorityScoreHistorySeries(student, confirmedAssignments, loadFn, studentAssistants = {}) {
-  const entries = buildPriorityHistoryEntries(student, confirmedAssignments, null);
-  if (studentAssistants[student]) {
-    return entries.map(entry => ({ score: 10, timestamp: entry.timestamp }));
-  }
-  let score = 5;
-  const series = [];
-  entries.forEach(entry => {
-    score = applyHistoryEntryScoreChange(entry, student, score, loadFn);
-    series.push({ score: Math.round(score * 10) / 10, timestamp: entry.timestamp });
-  });
-  return series;
 }
 
 function getWorkshopStudentsByBand(assignments, workshopName, bandIds) {
@@ -2423,6 +2389,8 @@ export default function WerkstattVerwaltungApp() {
   const hasVisitedWahlTab = useRef(false);
   const currentTrimesterKeyRef = useRef(null);
   const isLoadingChoicesRef = useRef(false);
+  const activeBandRef = useRef(activeBand);
+  activeBandRef.current = activeBand;
 
   const assignmentsForPriority = useMemo(() => {
     const merged = { ...confirmedAssignments };
@@ -2453,7 +2421,7 @@ export default function WerkstattVerwaltungApp() {
       );
     });
     return scores;
-  }, [students, assignmentsForPriority, studentAssistants, uploadedChoices]);
+  }, [students, assignmentsForPriority, studentAssistants]);
 
   useEffect(() => {
     setStudentPriorityScores(priorityScoresByStudent);
@@ -2492,7 +2460,7 @@ export default function WerkstattVerwaltungApp() {
       setActiveBandCount(bandIds.length);
       setDragAssignments(createStudentBandAssignments(students, bandIds));
     }
-    if (planBandIds?.length && !planBandIds.includes(activeBand)) {
+    if (planBandIds?.length && !planBandIds.includes(activeBandRef.current)) {
       setActiveBand(planBandIds[0]);
     }
     
@@ -2549,7 +2517,7 @@ export default function WerkstattVerwaltungApp() {
         trimester: p.trimester,
       });
     }
-  }, [tab, definedTrimesterList, trimesterPlans]);
+  }, [tab, definedTrimesterList, trimesterPlans, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester]);
   
   // Auto-save dragAssignments whenever they change (with debouncing to avoid too many saves)
   useEffect(() => {
@@ -3259,10 +3227,6 @@ export default function WerkstattVerwaltungApp() {
     return `Schuljahr ${schoolYearStart}/${schoolYearEnd}, ${trimesterNames[trimester]}`;
   }
 
-
-  function calculatePriorityScoreHistory(student) {
-    return computePriorityScoreHistorySeries(student, assignmentsForPriority, load, studentAssistants);
-  }
 
   function calculatePriorityScoreFromHistory(student) {
     return priorityScoresByStudent[student] ?? computePriorityScoreFromFullHistory(
@@ -8084,7 +8048,7 @@ function KlassenStufenRangeSlider({ pool, rangeFrom, rangeTo, onChange, onAddStu
   const clampedFrom = pool[fromIdx];
   const clampedTo = pool[toIdx];
 
-  function poolIndexFromClientX(clientX) {
+  const poolIndexFromClientX = useCallback((clientX) => {
     for (let i = 0; i < pool.length; i++) {
       const el = cellRefs.current[i];
       if (!el) continue;
@@ -8093,7 +8057,7 @@ function KlassenStufenRangeSlider({ pool, rangeFrom, rangeTo, onChange, onAddStu
       if (clientX < mid) return i;
     }
     return pool.length - 1;
-  }
+  }, [pool]);
 
   useEffect(() => {
     function onPointerMove(e) {
@@ -8119,7 +8083,7 @@ function KlassenStufenRangeSlider({ pool, rangeFrom, rangeTo, onChange, onAddStu
       window.removeEventListener('pointermove', onPointerMove);
       window.removeEventListener('pointerup', onPointerUp);
     };
-  }, [pool, fromIdx, toIdx, onChange]);
+  }, [pool, fromIdx, toIdx, onChange, poolIndexFromClientX]);
 
   function startDrag(edge, e) {
     e.preventDefault();
