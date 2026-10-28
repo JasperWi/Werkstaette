@@ -16,6 +16,7 @@ import {
   getTrimesterWahlCount,
   parseTrimesterSlotKey,
   bandIdsForCount,
+  bandIdForNumber,
   bandNumberFromId,
   bandShortLabel,
   isBandId,
@@ -535,6 +536,10 @@ const load = (key, fallback) => {
   }
 };
 
+function csvCell(value) {
+  return String(value ?? '').replace(/^\uFEFF/, '').trim();
+}
+
 function parseCSVToData(key, csvData) {
   if (!csvData || csvData.length === 0) return null;
   
@@ -542,7 +547,7 @@ function parseCSVToData(key, csvData) {
   
   try {
     if (key === 'wv_students') {
-      return rows.map(row => row[0]);
+      return rows.map(row => csvCell(row[0])).filter(Boolean);
     } else if (key === 'wv_workshops') {
       const result = {};
       rows.forEach(row => {
@@ -564,8 +569,13 @@ function parseCSVToData(key, csvData) {
         if (key === 'wv_studentAssistants') {
           result[row[0]] = row[1] === 'Ja' || row[1] === 'true';
         } else if (key === 'wv_studentEnrollmentYears') {
-          const year = parseInt(row[1], 10);
-          if (row[0] && Number.isFinite(year)) result[row[0]] = year;
+          const studentName = csvCell(row[0]);
+          const year = parseInt(csvCell(row[1]), 10);
+          if (studentName && Number.isFinite(year) && year >= 1990 && year <= 2100) result[studentName] = year;
+        } else if (key === 'wv_studentClasses') {
+          const studentName = csvCell(row[0]);
+          const className = csvCell(row[1]);
+          if (studentName && className) result[studentName] = className;
         } else if (key === 'wv_studentTrimesters' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' || key === 'wv_studentComments' || 
                    key === 'wv_workshopTeachers' || key === 'wv_workshopRooms') {
           // For comments, teachers, rooms, timestamps, preserve the value as-is (may contain newlines, semicolons, etc.)
@@ -1055,6 +1065,8 @@ async function importDataFromZIP(file) {
     // Process each file in ZIP
     for (const [filename, zipEntry] of Object.entries(zip.files)) {
       if (zipEntry.dir) continue;
+      const entryPath = String(filename).replace(/\\/g, '/');
+      const entryBase = entryPath.split('/').pop().toLowerCase();
       
       const content = await zipEntry.async('string');
       if (!content.trim()) continue;
@@ -1118,7 +1130,7 @@ async function importDataFromZIP(file) {
       
       if (data.length === 0) continue;
 
-      if (filename === 'trimester-plans.json') {
+      if (entryBase === 'trimester-plans.json') {
         try {
           importedData[LS_KEYS.trimesterPlans] = JSON.parse(content);
         } catch (e) {
@@ -1126,7 +1138,7 @@ async function importDataFromZIP(file) {
         }
         continue;
       }
-      if (filename === 'class-registry.json') {
+      if (entryBase === 'class-registry.json') {
         try {
           importedData[LS_KEYS.classRegistry] = JSON.parse(content);
         } catch (e) {
@@ -1134,7 +1146,7 @@ async function importDataFromZIP(file) {
         }
         continue;
       }
-      if (filename === 'klassenstufen-pool.json') {
+      if (entryBase === 'klassenstufen-pool.json') {
         try {
           importedData[LS_KEYS.klassenStufenPool] = JSON.parse(content);
         } catch (e) {
@@ -1142,7 +1154,7 @@ async function importDataFromZIP(file) {
         }
         continue;
       }
-      if (filename === 'student-class-upload-info.json') {
+      if (entryBase === 'student-class-upload-info.json') {
         try {
           const parsed = JSON.parse(content) || {};
           const current = importedData[LS_KEYS.studentClassUploadInfo] || {};
@@ -1173,7 +1185,7 @@ async function importDataFromZIP(file) {
         }
         continue;
       }
-      if (filename === 'allow-self-parallel.json') {
+      if (entryBase === 'allow-self-parallel.json') {
         try {
           importedData[LS_KEYS.allowSelfParallel] = JSON.parse(content);
         } catch (e) {
@@ -1181,46 +1193,55 @@ async function importDataFromZIP(file) {
         }
         continue;
       }
-      if (filename === 'export-manifest.json') {
+      if (entryBase === 'export-manifest.json') {
         continue;
       }
       
       const rows = data.slice(1);
       
       // Determine data type from filename
-      if (filename.startsWith('assignments/')) {
-        const slotKey = filename.replace('assignments/', '').replace('.csv', '');
+      const assignmentMatch = entryPath.match(/(?:^|\/)assignments\/(.+)\.csv$/i);
+      const choicesMatch = entryPath.match(/(?:^|\/)choices\/(.+)\.csv$/i);
+      if (assignmentMatch) {
+        const slotKey = assignmentMatch[1];
         if (!importedData.assignments) importedData.assignments = {};
         
         const assignments = createEmptyBandMap();
         const headerCells = data[0] || [];
         const bandColumns = [];
+        let classIdx = -1;
         headerCells.forEach((header, idx) => {
-          if (idx === 0 || idx === headerCells.length - 1) return;
-          const normalized = String(header || '').toLowerCase().replace(/\s/g, '');
-          const matchedBand = BANDS.find(b =>
-            normalized === b.id.toLowerCase() ||
-            normalized === b.label.toLowerCase().replace(/\s/g, '') ||
-            normalized === b.label.toLowerCase().replace(/\s/g, '').replace('ä', 'ae').replace('ü', 'ue').replace('ö', 'oe')
-          );
-          const numbered = normalized.match(/^(\d+)\.?band$/) || normalized.match(/^band(\d+)$/);
-          if (matchedBand) {
-            bandColumns.push({ idx, bandId: matchedBand.id });
-          } else if (numbered) {
-            const bandId = bandIdsForCount(Number(numbered[1]))[Number(numbered[1]) - 1];
-            if (bandId) bandColumns.push({ idx, bandId });
+          const normalized = csvCell(header).toLowerCase().replace(/\s/g, '');
+          if (idx > 0 && (normalized === 'klasse' || normalized === 'class' || normalized.includes('klasse'))) {
+            classIdx = idx;
           }
+        });
+        headerCells.forEach((header, idx) => {
+          if (idx === 0 || idx === classIdx) return;
+          const bandId = canonicalBandId(header);
+          if (bandId) bandColumns.push({ idx, bandId });
         });
 
         if (bandColumns.length === 0) {
-          bandColumns.push({ idx: 1, bandId: 'erstesBand' }, { idx: 2, bandId: 'zweitesBand' });
+          const fallback = [1, 2].filter(idx => idx !== classIdx && idx < headerCells.length);
+          fallback.forEach((idx, index) => {
+            const bandId = bandIdForNumber(index + 1);
+            if (bandId) bandColumns.push({ idx, bandId });
+          });
         }
 
+        if (!importedData.assignmentClasses) importedData.assignmentClasses = {};
+        if (!importedData.assignmentClasses[slotKey]) importedData.assignmentClasses[slotKey] = {};
         rows.forEach(row => {
-          if (row[0]) {
-            bandColumns.forEach(({ idx, bandId }) => {
-              if (row[idx]) assignments[bandId][row[0]] = row[idx];
-            });
+          const student = csvCell(row[0]);
+          if (!student) return;
+          bandColumns.forEach(({ idx, bandId }) => {
+            const value = csvCell(row[idx]);
+            if (value) assignments[bandId][student] = value;
+          });
+          if (classIdx >= 0) {
+            const className = csvCell(row[classIdx]);
+            if (className) importedData.assignmentClasses[slotKey][student] = className;
           }
         });
         
@@ -1229,44 +1250,44 @@ async function importDataFromZIP(file) {
           timestamp: rows[0]?.[headerCells.length - 1] || rows[0]?.[3] || new Date().toISOString(),
           bands: bandColumns.map(c => c.bandId)
         };
-      } else if (filename.startsWith('choices/')) {
-        // Import choices for a specific trimester
-        // Format: choices/${slotKey}_erstesBand.csv or choices/${slotKey}_zweitesBand.csv
-        const choicesFilename = filename.replace('choices/', '').replace('.csv', '');
+      } else if (choicesMatch) {
+        const choicesFilename = choicesMatch[1];
         const parts = choicesFilename.split('_');
-        if (parts.length >= 2) {
-          const band = parts[parts.length - 1]; // 'erstesBand' or 'zweitesBand'
-          const slotKey = parts.slice(0, -1).join('_'); // Everything before the last underscore
-          
+        const bandFromName = parts.length >= 2 ? canonicalBandId(parts[parts.length - 1]) : null;
+        const band = bandFromName || 'erstesBand';
+        const slotKey = bandFromName ? parts.slice(0, -1).join('_') : choicesFilename;
+        if (parseTrimesterSlotKey(slotKey)) {
           const choicesKey = `wv_choices_${slotKey}`;
           if (!importedData[choicesKey]) {
             importedData[choicesKey] = createEmptyChoicesMap();
           }
           
-          const { classIdx, choiceIdxs } = choiceColumnIndexes(data[0]);
+          const header = data[0] || [];
+          const columns = choiceColumnIndexes(header);
+          const classIdx = columns.classIdx >= 0 ? columns.classIdx : sniffClassColumn(header, rows, columns.studentIdx);
+          const choiceIdxs = columns.choiceIdxs.filter(index => index !== classIdx);
           if (!importedData[choicesKey].__classes) importedData[choicesKey].__classes = {};
           if (!importedData[choicesKey].__classes[band]) importedData[choicesKey].__classes[band] = {};
           if (!importedData[LS_KEYS.studentClassUploadInfo]) importedData[LS_KEYS.studentClassUploadInfo] = {};
           rows.forEach(row => {
-            if (row[0]) {
-              const student = row[0].trim();
-              const choices = choiceIdxs
-                .map(index => String(row[index] || '').trim())
-                .filter(Boolean);
-              if (choices.length > 0) {
-                importedData[choicesKey][band][student] = choices;
-              }
-              const className = classIdx >= 0 ? String(row[classIdx] || '').trim() : '';
-              if (className) {
-                importedData[choicesKey].__classes[band][student] = className;
-                rememberClassOnUpload(
-                  importedData[LS_KEYS.studentClassUploadInfo],
-                  student,
-                  slotKey,
-                  band,
-                  className
-                );
-              }
+            const student = csvCell(row[columns.studentIdx]);
+            if (!student) return;
+            const choices = choiceIdxs
+              .map(index => csvCell(row[index]))
+              .filter(Boolean);
+            if (choices.length > 0) {
+              importedData[choicesKey][band][student] = choices;
+            }
+            const className = classIdx >= 0 ? csvCell(row[classIdx]) : '';
+            if (className) {
+              importedData[choicesKey].__classes[band][student] = className;
+              rememberClassOnUpload(
+                importedData[LS_KEYS.studentClassUploadInfo],
+                student,
+                slotKey,
+                band,
+                className
+              );
             }
           });
         }
@@ -1293,7 +1314,7 @@ async function importDataFromZIP(file) {
           'archived-workshops.csv': 'wv_archivedWorkshops'
         };
         
-        const dataKey = keyMap[filename];
+        const dataKey = keyMap[entryBase];
         if (dataKey) {
           importedData[dataKey] = parseCSVToData(dataKey, data);
         }
@@ -1393,10 +1414,27 @@ function getRuleTypeLabel(ruleType) {
 
 function parseKlassenStufeFromClass(className) {
   if (!className) return null;
-  const match = String(className).trim().match(/^(\d{1,2})/);
+  const text = csvCell(className);
+  const labeled = text.match(/klasse\s*(\d{1,2})(?!\d)/i);
+  const leading = text.match(/^(\d{1,2})(?!\d)/);
+  const match = labeled || leading;
   if (!match) return null;
   const stufe = parseInt(match[1], 10);
-  return Number.isFinite(stufe) ? stufe : null;
+  if (!Number.isFinite(stufe) || stufe < 1 || stufe > 13) return null;
+  return stufe;
+}
+
+function normalizeStudentKey(name) {
+  return csvCell(name).replace(/\s+/g, ' ').toLowerCase();
+}
+
+function valueForStudent(map, student) {
+  if (!map || typeof map !== 'object') return undefined;
+  if (Object.prototype.hasOwnProperty.call(map, student)) return map[student];
+  const wanted = normalizeStudentKey(student);
+  if (!wanted) return undefined;
+  const key = Object.keys(map).find(name => normalizeStudentKey(name) === wanted);
+  return key == null ? undefined : map[key];
 }
 
 /** Erster Werkstatt-Jahrgang (Stufe 5 → Einschulungsjahr = Schuljahresstart). */
@@ -1418,10 +1456,14 @@ function classOnChoices(choices, student) {
   const classes = choices?.__classes;
   if (!classes || typeof classes !== 'object') return '';
   for (const bandId of Object.keys(classes)) {
-    const name = String(classes[bandId]?.[student] || '').trim();
+    const name = csvCell(valueForStudent(classes[bandId], student));
     if (name) return name;
   }
   return '';
+}
+
+function classOnSlotMap(classByStudent, student) {
+  return csvCell(valueForStudent(classByStudent, student));
 }
 
 function classOnUploadInfo(info, trimesterKey) {
@@ -1435,21 +1477,32 @@ function classOnUploadInfo(info, trimesterKey) {
 function studentHasParticipation(payload, choices, student) {
   if (payload?.assignments) {
     if (isLegacySingleBandAssignments(payload.assignments)) {
-      const value = payload.assignments[student];
+      const value = valueForStudent(payload.assignments, student);
       if (value && !isNotAssigned(value)) return true;
     }
     if (getPayloadBandIds(payload).some(bandId => {
-      const value = payload.assignments[bandId]?.[student];
+      const value = valueForStudent(payload.assignments[bandId], student);
       return value && !isNotAssigned(value);
     })) return true;
   }
+  if (classOnChoices(choices, student)) return true;
   return bandIdsInObject(choices).some(bandId => {
-    const row = choices[bandId]?.[student];
+    const row = valueForStudent(choices[bandId], student);
     return Array.isArray(row) ? row.some(Boolean) : Boolean(row);
   });
 }
 
-function fillMissingEnrollmentYearsFromParticipation({ students, enrollmentYears, assignments, choicesBySlot, classUploadInfo }) {
+function classForParticipationEvent(event, student, classUploadInfo, assignmentClasses) {
+  return classOnChoices(event.choices, student)
+    || classOnSlotMap(assignmentClasses?.[event.slot.canonicalKey], student)
+    || classOnSlotMap(assignmentClasses?.[event.slot.rawKey], student)
+    || classOnUploadInfo(classUploadInfo?.[student], event.slot.canonicalKey)
+    || classOnUploadInfo(classUploadInfo?.[student], event.slot.rawKey)
+    || classOnUploadInfo(valueForStudent(classUploadInfo, student), event.slot.canonicalKey)
+    || classOnUploadInfo(valueForStudent(classUploadInfo, student), event.slot.rawKey);
+}
+
+function fillMissingEnrollmentYearsFromParticipation({ students, enrollmentYears, assignments, choicesBySlot, classUploadInfo, studentClasses, assignmentClasses }) {
   const next = { ...(enrollmentYears || {}) };
   let filled = 0;
   (students || []).forEach(student => {
@@ -1460,7 +1513,7 @@ function fillMissingEnrollmentYearsFromParticipation({ students, enrollmentYears
       if (!slot) return;
       const payload = assignments?.[key] || assignments?.[slot.canonicalKey] || assignments?.[slot.rawKey];
       const choiceMap = choices || choicesBySlot?.[slot.canonicalKey] || choicesBySlot?.[slot.rawKey] || choicesBySlot?.[key];
-      if (!studentHasParticipation(payload, choiceMap, student)) return;
+      if (!studentHasParticipation(payload, choiceMap, student) && !classOnSlotMap(assignmentClasses?.[key], student) && !classOnSlotMap(assignmentClasses?.[slot.canonicalKey], student)) return;
       const existing = events.get(slot.canonicalKey);
       if (existing) {
         if (choices) existing.choices = choices;
@@ -1469,18 +1522,27 @@ function fillMissingEnrollmentYearsFromParticipation({ students, enrollmentYears
       events.set(slot.canonicalKey, { slot, choices: choiceMap });
     };
     Object.keys(assignments || {}).forEach(key => add(key, null));
+    Object.keys(assignmentClasses || {}).forEach(key => add(key, null));
     Object.entries(choicesBySlot || {}).forEach(([key, choices]) => add(key, choices));
     const ordered = [...events.values()].sort((a, b) => (b.slot.schoolYearStart - a.slot.schoolYearStart) || (b.slot.trimester - a.slot.trimester));
+    let yearSet = false;
     for (const event of ordered) {
-      const className = classOnChoices(event.choices, student)
-        || classOnUploadInfo(classUploadInfo?.[student], event.slot.canonicalKey)
-        || classOnUploadInfo(classUploadInfo?.[student], event.slot.rawKey);
+      const className = classForParticipationEvent(event, student, classUploadInfo, assignmentClasses);
       if (!className) continue;
       const year = inferEinschulungsjahrFromWahlClass(event.slot.schoolYearStart, className);
       if (year == null) continue;
       next[student] = year;
       filled += 1;
+      yearSet = true;
       break;
+    }
+    if (!yearSet && ordered[0]) {
+      const className = csvCell(valueForStudent(studentClasses, student));
+      const year = inferEinschulungsjahrFromWahlClass(ordered[0].slot.schoolYearStart, className);
+      if (year != null) {
+        next[student] = year;
+        filled += 1;
+      }
     }
   });
   return { years: next, filled };
@@ -1509,7 +1571,7 @@ function getStudentEinschulungsjahr(student, studentEnrollmentYears) {
 function getEinschulungsjahrYearOptions() {
   const current = new Date().getFullYear();
   const years = [];
-  for (let y = 2020; y <= current + 2; y++) years.push(y);
+  for (let y = 2000; y <= current + 2; y++) years.push(y);
   return years;
 }
 
@@ -1705,17 +1767,49 @@ function rememberClassOnUpload(map, student, trimesterKey, bandId, className) {
   };
 }
 
+function canonicalBandId(raw) {
+  const text = csvCell(raw);
+  if (isBandId(text)) return text;
+  const compact = text.toLowerCase().replace(/\s/g, '').replace('ä', 'ae').replace('ü', 'ue').replace('ö', 'oe');
+  const named = ['erstesBand', 'zweitesBand', 'drittesBand', 'viertesBand', 'fuenftesBand', 'sechstesBand']
+    .find(id => id.toLowerCase() === compact);
+  if (named) return named;
+  const numbered = compact.match(/^(\d+)\.?band$/) || compact.match(/^band(\d+)$/);
+  if (!numbered) return null;
+  return bandIdForNumber(Number(numbered[1]));
+}
+
 function choiceColumnIndexes(header) {
-  const normalized = (header || []).map(cell => String(cell || '').trim().toLowerCase());
-  const classIdx = normalized.findIndex(cell => cell === 'klasse' || cell === 'class' || cell === 'klassen');
+  const normalized = (header || []).map(cell => csvCell(cell).toLowerCase());
+  const studentIdx = Math.max(0, normalized.findIndex(cell =>
+    cell === 'student' || cell === 'schüler' || cell === 'schueler' || cell === 'name' || cell === 'schülername' || cell === 'schuelername'
+  ));
+  const classIdx = normalized.findIndex(cell => cell === 'klasse' || cell === 'class' || cell === 'klassen' || cell === 'klassenstufe' || cell.includes('klasse'));
   let choiceIdxs = normalized
     .map((cell, index) => ({ cell, index }))
-    .filter(({ cell, index }) => index !== 0 && index !== classIdx && (/^wahl/.test(cell) || /^wunsch/.test(cell) || /^q\d+$/.test(cell)))
+    .filter(({ cell, index }) => index !== studentIdx && index !== classIdx && (/^wahl/.test(cell) || /^wunsch/.test(cell) || /^q\d+$/.test(cell)))
     .map(({ index }) => index);
   if (!choiceIdxs.length) {
-    choiceIdxs = normalized.map((_, index) => index).filter(index => index !== 0 && index !== classIdx);
+    choiceIdxs = normalized.map((_, index) => index).filter(index => index !== studentIdx && index !== classIdx);
   }
-  return { classIdx, choiceIdxs };
+  return { classIdx, choiceIdxs, studentIdx };
+}
+
+function sniffClassColumn(header, rows, studentIdx) {
+  const scores = (header || []).map((_, index) => {
+    if (index === studentIdx) return 0;
+    let hits = 0;
+    let filled = 0;
+    (rows || []).forEach(row => {
+      const value = csvCell(row[index]);
+      if (!value) return;
+      filled += 1;
+      if (parseKlassenStufeFromClass(value) != null && !/^\d{4}$/.test(value)) hits += 1;
+    });
+    return filled > 0 && hits / filled >= 0.6 ? hits : 0;
+  });
+  const best = scores.reduce((top, score, index) => (score > top.score ? { index, score } : top), { index: -1, score: 0 });
+  return best.score > 0 ? best.index : -1;
 }
 
 function buildModifiedChoicesForBand(choicesMapFull, bandId, priorWorkshopsByStudent, cannotBeParallel, allowSelfParallel = {}) {
@@ -3025,7 +3119,6 @@ export default function WerkstattVerwaltungApp() {
       updatedClasses: [],
       newWorkshops: [],
       updatedChoices: 0,
-      inferredEnrollmentYears: [],
       errors: [],
       band: getBandLabel(targetBand),
     };
@@ -3040,7 +3133,6 @@ export default function WerkstattVerwaltungApp() {
     const newStudents = [...students];
     const newWorkshops = { ...workshops };
     const newStudentAssistants = { ...studentAssistants };
-    const newEnrollmentYears = { ...studentEnrollmentYears };
     const bandMap = { ...(uploadedChoices[targetBand] || {}) };
     const bandClasses = { ...(uploadedChoices.__classes?.[targetBand] || {}) };
 
@@ -3126,27 +3218,11 @@ export default function WerkstattVerwaltungApp() {
       if (normalizedChoices.length > 0) {
         bandMap[studentName] = normalizedChoices;
         summary.updatedChoices++;
-
-        if (className && getStudentEinschulungsjahr(studentName, newEnrollmentYears) == null) {
-          const inferred = inferEinschulungsjahrFromWahlClass(
-            yearTrimester.schoolYearStart,
-            className
-          );
-          if (inferred != null) {
-            newEnrollmentYears[studentName] = inferred;
-            summary.inferredEnrollmentYears.push({
-              student: studentName,
-              year: inferred,
-              className,
-            });
-          }
-        }
       }
     }
 
     setStudents(newStudents);
     setStudentClasses(newStudentClasses);
-    setStudentEnrollmentYears(newEnrollmentYears);
     setStudentClassUploadInfo(newClassUploadInfo);
     setWorkshops(newWorkshops);
     if (assistantIdx >= 0) {
@@ -4151,6 +4227,8 @@ export default function WerkstattVerwaltungApp() {
         assignments: importedData.assignments || {},
         choicesBySlot: rawChoicesBySlot,
         classUploadInfo: importedData[LS_KEYS.studentClassUploadInfo] || {},
+        studentClasses: importedData[LS_KEYS.studentClasses] || {},
+        assignmentClasses: importedData.assignmentClasses || {},
       });
       setStudentEnrollmentYears(enrollmentYears);
       if (importedData[LS_KEYS.classRegistry]) setClassRegistry(importedData[LS_KEYS.classRegistry]);
@@ -6138,8 +6216,8 @@ export default function WerkstattVerwaltungApp() {
                         {showEinschulungsjahrInfo && (
                           <div className="text-xs text-blue-950 bg-blue-50 border border-blue-200 rounded-lg p-3 mb-2 leading-relaxed space-y-2">
                             <p>
-                              Das Einschulungsjahr wird <strong>beim allerersten Auftauchen in einem Wahl-Upload</strong> gesetzt
-                              (sobald der Schüler Wahlen und eine Klasse in der Datei hat).
+                              Das Einschulungsjahr wird gesetzt, wenn auf dem Tab <strong>Daten</strong> ein ZIP alle vorhandenen Daten ersetzt
+                              und für den Schüler noch keins hinterlegt ist. Verwendet wird das letzte Trimester, in dem er mit einer Klasse vorkommt.
                             </p>
                             <p>
                               Daraus wird der Einschulungsjahrgang berechnet:{' '}
@@ -6149,13 +6227,12 @@ export default function WerkstattVerwaltungApp() {
                             <p>
                               <strong>Sitzenbleiben:</strong> Bleibt ein Schüler in derselben Klassenstufe hängen, wird{' '}
                               <strong>kein neues</strong> Einschulungsjahr vergeben — der Jahrgang bleibt für Regeln unverändert.
-                              Spätere Uploads ändern einen bereits gesetzten Wert nicht (nur manuell hier).
-                              Ein ZIP, das alle Daten ersetzt, setzt fehlende Jahrgänge aus dem letzten Trimester, in dem der Schüler schon mit einer Klasse vorkommt.
+                              Ein Wahl-Upload lässt einen gesetzten Jahrgang unverändert. Fehlt er, trägt ihn das ZIP auf dem Tab Daten ein, oder die Auswahl hier.
                             </p>
                           </div>
                         )}
                         <p className="text-xs text-gray-500 mb-2">
-                          Für Belegungs-Regeln nach Einschulungsjahrgang. Wird sonst automatisch beim ersten Wahl-Upload gesetzt.
+                          Für Belegungs-Regeln nach Einschulungsjahrgang. Ein ZIP auf dem Tab Daten, das alle Daten ersetzt, trägt fehlende Jahrgänge aus dem letzten Trimester mit Klasse ein.
                         </p>
                         <select
                           value={studentEnrollmentYears[selectedStudent] ?? ''}
@@ -6600,12 +6677,6 @@ export default function WerkstattVerwaltungApp() {
               )}
               {uploadSummary.updatedChoices > 0 && (
                 <p className="text-amber-800"><strong>Wahlen aktualisiert:</strong> {uploadSummary.updatedChoices} Schüler</p>
-              )}
-              {uploadSummary.inferredEnrollmentYears?.length > 0 && (
-                <p className="text-teal-800">
-                  <strong>Einschulungsjahr neu gesetzt:</strong>{' '}
-                  {uploadSummary.inferredEnrollmentYears.length} Schüler (beim ersten Wahl-Upload)
-                </p>
               )}
             </div>
           </div>
