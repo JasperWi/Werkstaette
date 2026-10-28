@@ -1,9 +1,21 @@
-import React, { useEffect, useState, useMemo, useRef, useCallback } from "react";
+import React, { useEffect, useState, useMemo, useRef, useCallback, useId } from "react";
 import JSZip from "jszip";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "./components/ui/dialog";
+import ColumnMappingModal from "./components/ColumnMappingModal";
+import TrimesterManagementPanel from "./components/TrimesterManagementPanel";
+import {
+  normalizeTrimesterPlans,
+  buildInferredTrimesterPlans,
+  getPlanBandIds,
+  resolveTrimesterWorkshopMeta,
+  isWorkshopOfferedInBand,
+  plansAsSortedList,
+  getTrimesterWahlCount,
+} from "./trimesterPlans";
+import { isStudentExpectedToVoteOnBand } from "./studentFlowHelpers";
 
 // WerkstattVerwaltungApp.jsx
 // Single-file React app (Tailwind CSS assumed) providing an administrative GUI
@@ -184,26 +196,6 @@ function computeBandStatistics(assignments, choices, bandIds) {
   };
 }
 
-function applyPriorityScoreChangeForStudent(assignments, choices, bandIds, student, currentScore) {
-  let totalChange = 0;
-  let bandsProcessed = 0;
-
-  bandIds.forEach(bandId => {
-    const assigned = assignments[bandId]?.[student];
-    const studentChoices = choices[bandId]?.[student] || [];
-    const change = processPriorityChangeForBand(assigned, studentChoices);
-    if (change !== null) {
-      totalChange += change;
-      bandsProcessed++;
-    }
-  });
-
-  if (bandsProcessed === 0) return currentScore;
-  const averageChange = totalChange / bandsProcessed;
-  const newScore = currentScore + averageChange;
-  return Math.max(1, Math.min(10, Math.round(newScore * 10) / 10));
-}
-
 function processPriorityChangeForBand(assigned, studentChoices) {
   if (studentChoices.length === 0 || !assigned || isNotAssigned(assigned)) {
     return null;
@@ -316,6 +308,16 @@ function applyHistoryEntryScoreChange(entry, student, currentScore, loadFn) {
   return Math.max(1, Math.min(10, newScore));
 }
 
+function computePriorityScoreFromFullHistory(student, confirmedAssignments, loadFn, studentAssistants = {}) {
+  if (studentAssistants[student]) return 10;
+  let score = 5;
+  const entries = buildPriorityHistoryEntries(student, confirmedAssignments, null);
+  entries.forEach(entry => {
+    score = applyHistoryEntryScoreChange(entry, student, score, loadFn);
+  });
+  return Math.round(score * 10) / 10;
+}
+
 function getWorkshopStudentsByBand(assignments, workshopName, bandIds) {
   const result = {};
   bandIds.forEach(bandId => {
@@ -361,13 +363,20 @@ const LS_KEYS = {
   studentTrimesters: "wv_studentTrimesters",
   studentAssistants: "wv_studentAssistants", // NEW: map student -> boolean
   studentClasses: "wv_studentClasses", // NEW: map student -> class name
+  studentEnrollmentYears: "wv_studentEnrollmentYears", // student -> Einschulungsjahr (number)
+  classRegistry: "wv_classRegistry", // known class names for pickers
+  klassenStufenPool: "wv_klassenStufenPool", // grade levels shown when configuring rules (e.g. 5, 6, 7)
+  studentClassUploadInfo: "wv_studentClassUploadInfo", // student -> { trimesterKey, className, uploads[] } from Wahl-Dateien
+  allowSelfParallel: "wv_allowSelfParallel", // workshop -> true, wenn der Kurs parallel zu sich selbst erlaubt ist
   studentPriorityScores: "wv_studentPriorityScores", // NEW: map student -> priority score (1-10)
   studentPriorityScoresLastChanged: "wv_studentPriorityScoresLastChanged", // NEW: map student -> ISO timestamp of last manual change
   workshopColors: "wv_workshopColors", // NEW: map workshop -> color hex
   studentComments: "wv_studentComments", // NEW: map student -> comment/notes
+  manualRuleChecks: "wv_manualRuleChecks", // NEW: map student -> { ruleId: boolean }
   workshopTeachers: "wv_workshopTeachers", // NEW: map workshop -> teacher name
   workshopRooms: "wv_workshopRooms", // NEW: map workshop -> room number
-  archivedWorkshops: "wv_archivedWorkshops" // NEW: map workshop -> { capacity, archivedAt }
+  archivedWorkshops: "wv_archivedWorkshops", // NEW: map workshop -> { capacity, archivedAt }
+  trimesterPlans: "wv_trimesterPlans", // trimester definitions (required before Wahl)
 };
 
 // CSV storage helpers
@@ -380,6 +389,28 @@ const LS_KEYS = {
 // - Manual export button: export all data as downloadable CSV files
 // - Manual delete button: clear all data and start fresh (with recovery from backups if needed)
 const CSV_SEPARATOR = ';'; // Semicolon for German Excel compatibility
+const ZIP_EXPORT_VERSION = 2;
+
+function collectChoicesBySlotKeyFromStorage() {
+  const out = {};
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i);
+    if (key && key.startsWith('wv_choices_')) {
+      out[key.replace('wv_choices_', '')] = normalizeBandDataObject(load(key, createEmptyChoicesMap()));
+    }
+  }
+  return out;
+}
+
+function collectChoicesBySlotKeyFromImport(importedData) {
+  const out = {};
+  Object.keys(importedData || {}).forEach(key => {
+    if (key.startsWith('wv_choices_')) {
+      out[key.replace('wv_choices_', '')] = normalizeBandDataObject(importedData[key]);
+    }
+  });
+  return out;
+}
 
 // School Year Helper Functions
 // School years are represented as "YYYY-YYYY T#" format (e.g., "2025-2026 T1", "2026-2028 T3")
@@ -514,12 +545,15 @@ function parseCSVToData(key, csvData) {
       });
       return result;
     } else if (key === 'wv_prevAssignments' || key === 'wv_prereqs' || key === 'wv_cannotBeParallel' || key === 'wv_studentTrimesters' || 
-               key === 'wv_studentAssistants' || key === 'wv_studentClasses' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' ||
+               key === 'wv_studentAssistants' || key === 'wv_studentClasses' || key === 'wv_studentEnrollmentYears' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' ||
                key === 'wv_workshopColors' || key === 'wv_studentComments' || key === 'wv_workshopTeachers' || key === 'wv_workshopRooms' || key === 'wv_archivedWorkshops') {
       const result = {};
       rows.forEach(row => {
         if (key === 'wv_studentAssistants') {
           result[row[0]] = row[1] === 'Ja' || row[1] === 'true';
+        } else if (key === 'wv_studentEnrollmentYears') {
+          const year = parseInt(row[1], 10);
+          if (row[0] && Number.isFinite(year)) result[row[0]] = year;
         } else if (key === 'wv_studentTrimesters' || key === 'wv_studentPriorityScores' || key === 'wv_studentPriorityScoresLastChanged' || key === 'wv_studentComments' || 
                    key === 'wv_workshopTeachers' || key === 'wv_workshopRooms') {
           // For comments, teachers, rooms, timestamps, preserve the value as-is (may contain newlines, semicolons, etc.)
@@ -546,20 +580,39 @@ function parseCSVToData(key, csvData) {
         const baseRule = {
           id: Date.now() + Math.random() + idx,
           type: ruleType,
-          name: row[1] || ''
+          name: row[1] || '',
+          klassenStufenRange: parseKlassenStufenRangeFromCsvCell(row[9]),
+          einschulungsjahrFrom: parseOptionalRuleYear(row[10]),
+          einschulungsjahrTo: parseOptionalRuleYear(row[11]),
         };
         
         if (ruleType === 'belegung') {
           return {
             ...baseRule,
-            options: row[2] ? row[2].split(',').map(s => s.trim()) : []
+            options: row[2] ? row[2].split(',').map(s => s.trim()).filter(Boolean) : []
           };
-        } else if (ruleType === 'folgekurs') {
+        }
+        if (ruleType === 'mindestbelegung') {
+          const minCount = parseInt(row[7], 10);
+          return {
+            ...baseRule,
+            options: row[2] ? row[2].split(',').map(s => s.trim()).filter(Boolean) : [],
+            minCount: Number.isFinite(minCount) && minCount > 0 ? minCount : 1
+          };
+        }
+        if (ruleType === 'freitext') {
+          return {
+            ...baseRule,
+            description: row[8] || row[2] || ''
+          };
+        }
+        if (ruleType === 'folgekurs') {
           return {
             ...baseRule,
             fromCourse: row[3] || '',
             toCourse: row[4] || '',
-            sameBand: row[5] === 'true' || row[5] === 'Ja'
+            sameBand: row[5] === 'true' || row[5] === 'Ja',
+            duration: row[6] ? parseInt(row[6], 10) : undefined
           };
         }
         return baseRule;
@@ -579,7 +632,9 @@ const EXPORT_CONFIG = {
   'wv_prevAssignments': { filename: 'previous-assignments.csv', headers: ['Student', 'Workshop'] },
   'wv_prereqs': { filename: 'prerequisites.csv', headers: ['Workshop', 'RequiredCourses'] },
   'wv_cannotBeParallel': { filename: 'cannot-be-parallel.csv', headers: ['Workshop', 'CannotBeParallelWith'] },
-  'wv_rules': { filename: 'rules.csv', headers: ['RuleType', 'RuleName', 'Options', 'FromCourse', 'ToCourse', 'SameBand'] },
+  'wv_rules': { filename: 'rules.csv', headers: ['RuleType', 'RuleName', 'Options', 'FromCourse', 'ToCourse', 'SameBand', 'Duration', 'MinCount', 'Description', 'KlassenStufen', 'EinschulungVon', 'EinschulungBis'] },
+  'wv_studentEnrollmentYears': { filename: 'student-enrollment-years.csv', headers: ['Student', 'EnrollmentYear'] },
+  'wv_manualRuleChecks': { filename: 'manual-rule-checks.csv', headers: ['Student', 'RuleId', 'Checked'] },
   'wv_studentTrimesters': { filename: 'student-trimesters.csv', headers: ['Student', 'Trimester'] },
   'wv_studentAssistants': { filename: 'student-assistants.csv', headers: ['Student', 'NeedsAssistance'] },
   'wv_studentClasses': { filename: 'student-classes.csv', headers: ['Student', 'Class'] },
@@ -606,29 +661,7 @@ function autoExportToCSV(key, data) {
         if (Array.isArray(data)) {
           if (config.headers[0] === 'RuleType') {
             // New format: RuleType, RuleName, Options, FromCourse, ToCourse, SameBand
-            csvData = data.map(item => {
-              const ruleType = item.type || 'belegung';
-              if (ruleType === 'belegung') {
-                return [
-                  'belegung',
-                  item.name || '',
-                  (item.options || []).join(', '),
-                  '', // FromCourse
-                  '', // ToCourse
-                  ''  // SameBand
-                ];
-              } else if (ruleType === 'folgekurs') {
-                return [
-                  'folgekurs',
-                  item.name || '',
-                  '', // Options
-                  item.fromCourse || '',
-                  item.toCourse || '',
-                  item.sameBand ? 'true' : 'false'
-                ];
-              }
-              return ['belegung', item.name || '', (item.options || []).join(', '), '', '', ''];
-            });
+            csvData = data.map(item => ruleToExportRow(item));
           } else if (config.headers[0] === 'RuleName') {
             // Legacy format: RuleName, Options (for backward compatibility)
             csvData = data.map(item => {
@@ -644,7 +677,16 @@ function autoExportToCSV(key, data) {
         csvData = data.map(item => [item]);
       }
     } else if (typeof data === 'object') {
-      if (key === 'wv_workshops') {
+      if (key === 'wv_manualRuleChecks') {
+        csvData = [];
+        Object.entries(data || {}).forEach(([student, checks]) => {
+          Object.entries(checks || {}).forEach(([ruleId, checked]) => {
+            if (checked) {
+              csvData.push([student, ruleId, 'true']);
+            }
+          });
+        });
+      } else if (key === 'wv_workshops') {
         csvData = Object.entries(data).map(([name, workshop]) => {
           const capacity = getWorkshopCapacity(workshop, name);
           const availableBands = getWorkshopAvailableBands(workshop, name);
@@ -660,6 +702,8 @@ function autoExportToCSV(key, data) {
         csvData = Object.entries(data).map(([student, needs]) => [student, needs ? 'Ja' : 'Nein']);
       } else if (key === 'wv_studentClasses') {
         csvData = Object.entries(data).map(([student, className]) => [student, className]);
+      } else if (key === 'wv_studentEnrollmentYears') {
+        csvData = Object.entries(data).map(([student, year]) => [student, String(year)]);
       } else if (key === 'wv_studentPriorityScores') {
         csvData = Object.entries(data).map(([student, score]) => [student, score]);
       } else if (key === 'wv_studentComments') {
@@ -780,10 +824,17 @@ async function exportAllDataAsZIP(allData) {
           
           ALL_BAND_IDS.forEach(bandId => {
             const bandData = [];
-            bandData.push(['Student', 'Wahl 1', 'Wahl 2']);
+            let maxWishes = 2;
+            Object.values(choicesData[bandId] || {}).forEach(choices => {
+              if (Array.isArray(choices)) maxWishes = Math.max(maxWishes, choices.length);
+            });
+            const wishHeaders = Array.from({ length: maxWishes }, (_, i) => `Wahl ${i + 1}`);
+            bandData.push(['Student', 'Klasse', ...wishHeaders]);
             Object.entries(choicesData[bandId] || {}).forEach(([student, choices]) => {
               if (Array.isArray(choices) && choices.length > 0) {
-                bandData.push([student, choices[0] || '', choices[1] || '']);
+                const row = [student, choicesData.__classes?.[bandId]?.[student] || ''];
+                for (let w = 0; w < maxWishes; w += 1) row.push(choices[w] || '');
+                bandData.push(row);
               }
             });
             
@@ -841,30 +892,7 @@ async function exportAllDataAsZIP(allData) {
         
         if (Array.isArray(data)) {
           if (config.headers[0] === 'RuleType') {
-            // New format: RuleType, RuleName, Options, FromCourse, ToCourse, SameBand
-            csvData = data.map(item => {
-              const ruleType = item.type || 'belegung';
-              if (ruleType === 'belegung') {
-                return [
-                  'belegung',
-                  item.name || '',
-                  (item.options || []).join(', '),
-                  '', // FromCourse
-                  '', // ToCourse
-                  ''  // SameBand
-                ];
-              } else if (ruleType === 'folgekurs') {
-                return [
-                  'folgekurs',
-                  item.name || '',
-                  '', // Options
-                  item.fromCourse || '',
-                  item.toCourse || '',
-                  item.sameBand ? 'true' : 'false'
-                ];
-              }
-              return ['belegung', item.name || '', (item.options || []).join(', '), '', '', ''];
-            });
+            csvData = data.map(item => ruleToExportRow(item));
           } else if (config.headers[0] === 'RuleName') {
             // Legacy format: RuleName, Options (for backward compatibility)
             csvData = data.map(item => {
@@ -900,6 +928,15 @@ async function exportAllDataAsZIP(allData) {
             csvData = Object.entries(data).map(([student, score]) => [student, score]);
           } else if (lsKey === 'wv_studentPriorityScoresLastChanged') {
             csvData = Object.entries(data).map(([student, timestamp]) => [student, timestamp || '']);
+          } else if (lsKey === 'wv_manualRuleChecks') {
+            csvData = [];
+            Object.entries(data || {}).forEach(([student, checks]) => {
+              Object.entries(checks || {}).forEach(([ruleId, checked]) => {
+                if (checked) {
+                  csvData.push([student, ruleId, 'true']);
+                }
+              });
+            });
           } else if (lsKey === 'wv_studentComments') {
             // Properly escape comments for CSV (handle semicolons, quotes, newlines)
             csvData = Object.entries(data).map(([student, comment]) => {
@@ -937,6 +974,49 @@ async function exportAllDataAsZIP(allData) {
         }
       }
     });
+
+    // JSON payloads (trimester config + registries not covered by CSV EXPORT_CONFIG)
+    const trimesterPlans = allData[LS_KEYS.trimesterPlans];
+    if (trimesterPlans && Object.keys(trimesterPlans).length > 0) {
+      zip.file('trimester-plans.json', JSON.stringify(trimesterPlans, null, 2));
+    }
+    const classRegistry = allData[LS_KEYS.classRegistry];
+    if (Array.isArray(classRegistry) && classRegistry.length > 0) {
+      zip.file('class-registry.json', JSON.stringify(classRegistry, null, 2));
+    }
+    const klassenPool = allData[LS_KEYS.klassenStufenPool];
+    if (Array.isArray(klassenPool) && klassenPool.length > 0) {
+      zip.file('klassenstufen-pool.json', JSON.stringify(klassenPool, null, 2));
+    }
+    const classUploadInfo = allData[LS_KEYS.studentClassUploadInfo];
+    if (classUploadInfo && Object.keys(classUploadInfo).length > 0) {
+      zip.file('student-class-upload-info.json', JSON.stringify(classUploadInfo, null, 2));
+    }
+    const allowSelfParallel = allData[LS_KEYS.allowSelfParallel];
+    if (allowSelfParallel && Object.keys(allowSelfParallel).length > 0) {
+      zip.file('allow-self-parallel.json', JSON.stringify(allowSelfParallel, null, 2));
+    }
+
+    zip.file(
+      'export-manifest.json',
+      JSON.stringify(
+        {
+          exportVersion: ZIP_EXPORT_VERSION,
+          exportedAt: new Date().toISOString(),
+          includes: {
+            csv: Object.values(EXPORT_CONFIG).map(c => c.filename),
+            assignments: 'assignments/*.csv',
+            choices: 'choices/*.csv',
+            trimesterPlans: Boolean(trimesterPlans && Object.keys(trimesterPlans).length),
+            classRegistry: Boolean(classRegistry?.length),
+            klassenStufenPool: Boolean(klassenPool?.length),
+            studentClassUploadInfo: Boolean(classUploadInfo && Object.keys(classUploadInfo).length),
+          },
+        },
+        null,
+        2
+      )
+    );
     
     // Generate ZIP file
     const blob = await zip.generateAsync({ type: 'blob' });
@@ -1025,6 +1105,73 @@ async function importDataFromZIP(file) {
       }
       
       if (data.length === 0) continue;
+
+      if (filename === 'trimester-plans.json') {
+        try {
+          importedData[LS_KEYS.trimesterPlans] = JSON.parse(content);
+        } catch (e) {
+          console.warn('trimester-plans.json parse failed', e);
+        }
+        continue;
+      }
+      if (filename === 'class-registry.json') {
+        try {
+          importedData[LS_KEYS.classRegistry] = JSON.parse(content);
+        } catch (e) {
+          console.warn('class-registry.json parse failed', e);
+        }
+        continue;
+      }
+      if (filename === 'klassenstufen-pool.json') {
+        try {
+          importedData[LS_KEYS.klassenStufenPool] = JSON.parse(content);
+        } catch (e) {
+          console.warn('klassenstufen-pool.json parse failed', e);
+        }
+        continue;
+      }
+      if (filename === 'student-class-upload-info.json') {
+        try {
+          const parsed = JSON.parse(content) || {};
+          const current = importedData[LS_KEYS.studentClassUploadInfo] || {};
+          Object.entries(parsed).forEach(([student, info]) => {
+            if (!info || typeof info !== 'object') return;
+            const existing = current[student];
+            const uploads = [...(existing?.uploads || [])];
+            (info.uploads || []).forEach(entry => {
+              if (!uploads.some(item => item.trimesterKey === entry.trimesterKey && item.bandId === entry.bandId)) {
+                uploads.push(entry);
+              }
+            });
+            if (!existing) {
+              current[student] = uploads.length ? { ...info, uploads } : info;
+              return;
+            }
+            if (!uploads.length) return;
+            const latest = [...uploads].sort((a, b) => String(a.trimesterKey).localeCompare(String(b.trimesterKey))).pop();
+            current[student] = {
+              trimesterKey: latest.trimesterKey,
+              className: latest.className,
+              uploads,
+            };
+          });
+          importedData[LS_KEYS.studentClassUploadInfo] = current;
+        } catch (e) {
+          console.warn('student-class-upload-info.json parse failed', e);
+        }
+        continue;
+      }
+      if (filename === 'allow-self-parallel.json') {
+        try {
+          importedData[LS_KEYS.allowSelfParallel] = JSON.parse(content);
+        } catch (e) {
+          console.warn('allow-self-parallel.json parse failed', e);
+        }
+        continue;
+      }
+      if (filename === 'export-manifest.json') {
+        continue;
+      }
       
       const rows = data.slice(1);
       
@@ -1092,15 +1239,29 @@ async function importDataFromZIP(file) {
             importedData[choicesKey] = createEmptyChoicesMap();
           }
           
-          // Parse choices from CSV (format: Student, Wahl 1, Wahl 2)
+          const { classIdx, choiceIdxs } = choiceColumnIndexes(data[0]);
+          if (!importedData[choicesKey].__classes) importedData[choicesKey].__classes = {};
+          if (!importedData[choicesKey].__classes[band]) importedData[choicesKey].__classes[band] = {};
+          if (!importedData[LS_KEYS.studentClassUploadInfo]) importedData[LS_KEYS.studentClassUploadInfo] = {};
           rows.forEach(row => {
             if (row[0]) {
               const student = row[0].trim();
-              const choices = [];
-              if (row[1] && row[1].trim()) choices.push(row[1].trim());
-              if (row[2] && row[2].trim()) choices.push(row[2].trim());
+              const choices = choiceIdxs
+                .map(index => String(row[index] || '').trim())
+                .filter(Boolean);
               if (choices.length > 0) {
                 importedData[choicesKey][band][student] = choices;
+              }
+              const className = classIdx >= 0 ? String(row[classIdx] || '').trim() : '';
+              if (className) {
+                importedData[choicesKey].__classes[band][student] = className;
+                rememberClassOnUpload(
+                  importedData[LS_KEYS.studentClassUploadInfo],
+                  student,
+                  slotKey,
+                  band,
+                  className
+                );
               }
             }
           });
@@ -1117,10 +1278,12 @@ async function importDataFromZIP(file) {
           'student-trimesters.csv': 'wv_studentTrimesters',
           'student-assistants.csv': 'wv_studentAssistants',
           'student-classes.csv': 'wv_studentClasses',
+          'student-enrollment-years.csv': 'wv_studentEnrollmentYears',
           'priority-scores.csv': 'wv_studentPriorityScores',
           'priority-scores-last-changed.csv': 'wv_studentPriorityScoresLastChanged',
           'workshop-colors.csv': 'wv_workshopColors',
           'student-comments.csv': 'wv_studentComments',
+          'manual-rule-checks.csv': 'wv_manualRuleChecks',
           'workshop-teachers.csv': 'wv_workshopTeachers',
           'workshop-rooms.csv': 'wv_workshopRooms',
           'archived-workshops.csv': 'wv_archivedWorkshops'
@@ -1149,9 +1312,233 @@ function hasPrereqs(student, workshopName, prevAssignments, prereqs) {
     return required.every(req => prevWorkshops.includes(req));
 }
 
+function workshopsFromHistoryEntry(entry) {
+  const found = [];
+  const push = (workshop) => {
+    if (workshop && !isNotAssigned(workshop)) found.push(workshop);
+  };
+  if (Array.isArray(entry?.bandAssignments)) {
+    entry.bandAssignments.forEach(push);
+  } else if (entry?.bandAssignments && typeof entry.bandAssignments === 'object') {
+    Object.values(entry.bandAssignments).forEach(push);
+  }
+  push(entry?.erstesBand);
+  push(entry?.zweitesBand);
+  if (found.length === 0 && entry?.assigned && !String(entry.assigned).includes('/')) {
+    push(entry.assigned);
+  }
+  return found;
+}
+
+function bandIdForCourse(entry, course) {
+  if (Array.isArray(entry?.bandIds) && Array.isArray(entry?.bandAssignments)) {
+    const index = entry.bandAssignments.findIndex(workshop => workshop === course);
+    return index >= 0 ? entry.bandIds[index] : null;
+  }
+  if (entry?.bandAssignments && typeof entry.bandAssignments === 'object') {
+    return Object.keys(entry.bandAssignments).find(bandId => entry.bandAssignments[bandId] === course) || null;
+  }
+  if (entry?.erstesBand === course) return 'erstesBand';
+  if (entry?.zweitesBand === course) return 'zweitesBand';
+  return null;
+}
+
+function flattenWorkshopsFromStudentHistory(historyEntries) {
+  return (historyEntries || []).flatMap(workshopsFromHistoryEntry);
+}
+
+function countDistinctWorkshopsFromOptions(historyFlat, options) {
+  const allowed = new Set(options || []);
+  const matched = new Set();
+  historyFlat.forEach(w => {
+    if (allowed.has(w)) matched.add(w);
+  });
+  return matched.size;
+}
+
+function ruleToExportRow(item) {
+  const ruleType = item.type || 'belegung';
+  return [
+    ruleType,
+    item.name || '',
+    (item.options || []).join(', '),
+    item.fromCourse || '',
+    item.toCourse || '',
+    item.sameBand ? 'true' : 'false',
+    item.duration != null ? String(item.duration) : '',
+    item.minCount != null ? String(item.minCount) : '',
+    item.description || '',
+    (() => {
+      const range = getRuleKlassenStufenRange(item);
+      return range ? `${range.from}-${range.to}` : '';
+    })(),
+    item.einschulungsjahrFrom != null ? String(item.einschulungsjahrFrom) : '',
+    item.einschulungsjahrTo != null ? String(item.einschulungsjahrTo) : '',
+  ];
+}
+
+function getRuleTypeLabel(ruleType) {
+  switch (ruleType) {
+    case 'folgekurs': return 'Folgekurs';
+    case 'mindestbelegung': return 'Mindestanzahl';
+    case 'freitext': return 'Freitext / Checkliste';
+    case 'belegung':
+    default: return 'Alle Kurse';
+  }
+}
+
+function parseKlassenStufeFromClass(className) {
+  if (!className) return null;
+  const match = String(className).trim().match(/^(\d{1,2})/);
+  if (!match) return null;
+  const stufe = parseInt(match[1], 10);
+  return Number.isFinite(stufe) ? stufe : null;
+}
+
+/** Erster Werkstatt-Jahrgang (Stufe 5 → Einschulungsjahr = Schuljahresstart). */
+const DEFAULT_EINSCHULUNG_ENTRY_STUFE = 5;
+
+/**
+ * Leitet das Einschulungsjahr aus dem Schuljahresstart und der Klassenstufe beim ersten Wahl-Upload ab.
+ * Beispiel: Stufe 5 in SJ 2024/25 → 2024; Stufe 7 in SJ 2025/26 → 2023.
+ */
+function inferEinschulungsjahrFromWahlClass(schoolYearStart, className, entryStufe = DEFAULT_EINSCHULUNG_ENTRY_STUFE) {
+  const stufe = parseKlassenStufeFromClass(className);
+  if (stufe == null || !Number.isFinite(Number(schoolYearStart))) return null;
+  const yearsSinceEntry = stufe - entryStufe;
+  if (yearsSinceEntry < 0) return null;
+  return Number(schoolYearStart) - yearsSinceEntry;
+}
+
+function normalizeRuleKlassenStufen(raw) {
+  if (!raw) return [];
+  const list = Array.isArray(raw) ? raw : String(raw).split(',');
+  return [...new Set(list.map(v => parseInt(String(v).trim(), 10)).filter(n => Number.isFinite(n)))].sort((a, b) => a - b);
+}
+
+function getStudentKlassenStufe(student, studentClasses) {
+  return parseKlassenStufeFromClass(studentClasses?.[student]);
+}
+
+function parseOptionalRuleYear(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const n = parseInt(String(value).trim(), 10);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getStudentEinschulungsjahr(student, studentEnrollmentYears) {
+  return parseOptionalRuleYear(studentEnrollmentYears?.[student]);
+}
+
+function getEinschulungsjahrYearOptions() {
+  const current = new Date().getFullYear();
+  const years = [];
+  for (let y = 2020; y <= current + 2; y++) years.push(y);
+  return years;
+}
+
+function getRuleEinschulungsjahrgangBounds(rule) {
+  const from = parseOptionalRuleYear(rule?.einschulungsjahrFrom);
+  const to = parseOptionalRuleYear(rule?.einschulungsjahrTo);
+  return { from, to };
+}
+
+/** open = no filter | match | missing | outside */
+function getStudentCohortRuleStatus(rule, student, studentEnrollmentYears) {
+  const { from, to } = getRuleEinschulungsjahrgangBounds(rule);
+  if (from == null && to == null) return 'open';
+  const year = getStudentEinschulungsjahr(student, studentEnrollmentYears);
+  if (year == null) return 'missing';
+  if (from != null && year < from) return 'outside';
+  if (to != null && year > to) return 'outside';
+  return 'match';
+}
+
+function getRuleKlassenStufenRange(rule) {
+  if (rule?.klassenStufenRange?.from != null && rule?.klassenStufenRange?.to != null) {
+    let from = Number(rule.klassenStufenRange.from);
+    let to = Number(rule.klassenStufenRange.to);
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return null;
+    if (from > to) [from, to] = [to, from];
+    return { from, to };
+  }
+  const list = normalizeRuleKlassenStufen(rule?.klassenStufen);
+  if (list.length === 0) return null;
+  return { from: list[0], to: list[list.length - 1] };
+}
+
+/** upcoming | active | after | unknown | all */
+function getRuleZeitraumPhase(rule, student, studentClasses) {
+  const range = getRuleKlassenStufenRange(rule);
+  if (!range) return 'all';
+  const stufe = getStudentKlassenStufe(student, studentClasses);
+  if (stufe == null) return 'unknown';
+  if (stufe < range.from) return 'upcoming';
+  if (stufe > range.to) return 'after';
+  return 'active';
+}
+
+function ruleAppliesToStudent(rule, student, studentClasses, studentEnrollmentYears = {}) {
+  const cohort = getStudentCohortRuleStatus(rule, student, studentEnrollmentYears);
+  if (cohort === 'missing' || cohort === 'outside') return false;
+  const phase = getRuleZeitraumPhase(rule, student, studentClasses);
+  if (phase === 'upcoming' || phase === 'unknown') return false;
+  return true;
+}
+
+function ruleEnforcesNow(rule, student, studentClasses, studentEnrollmentYears = {}) {
+  const cohort = getStudentCohortRuleStatus(rule, student, studentEnrollmentYears);
+  if (cohort !== 'open' && cohort !== 'match') return false;
+  return getRuleZeitraumPhase(rule, student, studentClasses) === 'active';
+}
+
+function formatRuleScopeLabel(rule) {
+  const parts = [];
+  const range = getRuleKlassenStufenRange(rule);
+  if (range) parts.push(`Stufe ${range.from}–${range.to}`);
+  else parts.push('alle Stufen');
+  const { from, to } = getRuleEinschulungsjahrgangBounds(rule);
+  if (from == null && to == null) parts.push('alle Einschulungsjahrgänge');
+  else if (from != null && to != null) parts.push(`Einschulung ${from}–${to}`);
+  else if (from != null) parts.push(`Einschulung ab ${from}`);
+  else parts.push(`Einschulung bis ${to}`);
+  return parts.join(' · ');
+}
+
+function formatRuleZeitraumLabel(rule) {
+  return formatRuleScopeLabel(rule);
+}
+
+function mergeKlassenStufenPool(savedPool, classRegistry) {
+  const fromClasses = (classRegistry || [])
+    .map(parseKlassenStufeFromClass)
+    .filter(stufe => stufe != null);
+  const base = normalizeRuleKlassenStufen(savedPool);
+  const fallback = base.length > 0 ? base : [5, 6, 7, 8, 9, 10];
+  return [...new Set([...fallback, ...fromClasses])].sort((a, b) => a - b);
+}
+
+function parseKlassenStufenRangeFromCsvCell(cell) {
+  if (!cell) return null;
+  const raw = String(cell).trim();
+  const rangeMatch = raw.match(/^(\d{1,2})\s*[-–]\s*(\d{1,2})$/);
+  if (rangeMatch) {
+    const from = parseInt(rangeMatch[1], 10);
+    const to = parseInt(rangeMatch[2], 10);
+    if (Number.isFinite(from) && Number.isFinite(to)) {
+      return from <= to ? { from, to } : { from: to, to: from };
+    }
+  }
+  const list = normalizeRuleKlassenStufen(raw);
+  if (list.length === 0) return null;
+  return { from: list[0], to: list[list.length - 1] };
+}
+
 // Check if student needs to follow a Folgekurs rule
-function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band) {
-  const folgekursRules = rules.filter(r => (r.type || 'belegung') === 'folgekurs');
+function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses = {}, studentEnrollmentYears = {}) {
+  const folgekursRules = rules.filter(
+    r => (r.type || 'belegung') === 'folgekurs' && ruleEnforcesNow(r, student, studentClasses, studentEnrollmentYears)
+  );
   if (folgekursRules.length === 0) return null;
   
   const prevKey = getPreviousTrimesterKey(schoolYearStart, schoolYearEnd, currentTrimester);
@@ -1206,114 +1593,123 @@ function isFolgekursFulfilled(requiredFolgekurs, assignments, student, activeBan
   );
 }
 
-// Auto-assignment algorithm for all active bands
-function autoAssignAllBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel = {}, activeBandIds = DEFAULT_BAND_IDS) {
-  const sortedStudents = [...students].sort((a, b) => {
-    const scoreA = studentPriorityScores[a] || 5;
-    const scoreB = studentPriorityScores[b] || 5;
-    return scoreB - scoreA;
+function buildPriorWorkshopsFromOtherBands(dragByBand, activeBandIds, excludeBandId, studentList) {
+  const priorWorkshopsByStudent = {};
+  studentList.forEach(student => {
+    priorWorkshopsByStudent[student] = [];
   });
-
-  const bandResults = {};
-  const cumulativeByStudent = {};
-  const allProblems = [];
-  const conflicts = [];
-
   activeBandIds.forEach(bandId => {
-    const priorWorkshopsByStudent = {};
-    Object.keys(cumulativeByStudent).forEach(student => {
-      priorWorkshopsByStudent[student] = [...(cumulativeByStudent[student] || [])];
-    });
-
-    const modifiedChoices = {};
-    Object.keys(choicesMap[bandId] || {}).forEach(student => {
-      const originalChoices = choicesMap[bandId][student] || [];
-      const priorWorkshops = priorWorkshopsByStudent[student] || [];
-      let filteredChoices = originalChoices.filter(choice => !priorWorkshops.includes(choice));
-
-      priorWorkshops.forEach(priorWorkshop => {
-        const cannotList = cannotBeParallel[priorWorkshop] || [];
-        filteredChoices = filteredChoices.filter(choice => !cannotList.includes(choice));
-      });
-
-      if (filteredChoices.length > 0) {
-        modifiedChoices[student] = filteredChoices;
+    if (bandId === excludeBandId) return;
+    studentList.forEach(student => {
+      const workshop = dragByBand[bandId]?.[student];
+      if (!isNotAssigned(workshop) && !priorWorkshopsByStudent[student].includes(workshop)) {
+        priorWorkshopsByStudent[student].push(workshop);
       }
-    });
-
-    Object.keys(choicesMap[bandId] || {}).forEach(student => {
-      if (!(priorWorkshopsByStudent[student]?.length) && choicesMap[bandId][student] && !modifiedChoices[student]) {
-        modifiedChoices[student] = choicesMap[bandId][student];
-      }
-    });
-
-    const bandResult = autoAssignSingleBand(
-      sortedStudents,
-      workshops,
-      prevAssignments,
-      prereqs,
-      modifiedChoices,
-      studentAssistants,
-      studentPriorityScores,
-      rules,
-      confirmedAssignments,
-      schoolYearStart,
-      schoolYearEnd,
-      currentTrimester,
-      bandId
-    );
-
-    bandResults[bandId] = bandResult;
-
-    Object.keys(bandResult.assignments).forEach(student => {
-      const workshop = bandResult.assignments[student];
-      if (workshop) {
-        if (!cumulativeByStudent[student]) cumulativeByStudent[student] = [];
-        cumulativeByStudent[student].push(workshop);
-      }
-    });
-
-    allProblems.push(
-      ...bandResult.problems.map(p => ({ message: p, band: bandId, bandLabel: getBandLabel(bandId) }))
-    );
-
-    priorWorkshopsByStudent && Object.keys(bandResult.assignments).forEach(student => {
-      const currentWorkshop = bandResult.assignments[student];
-      const priorWorkshops = priorWorkshopsByStudent[student] || [];
-      if (!currentWorkshop) return;
-
-      if (priorWorkshops.includes(currentWorkshop)) {
-        delete bandResult.assignments[student];
-        const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
-        if (bandResult.kap) {
-          bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
-        }
-        if (bandResult.num1 > 0) bandResult.num1--;
-        if (bandResult.num2 > 0) bandResult.num2--;
-        conflicts.push(`${student} wurde in mehreren Bändern ${currentWorkshop} zugeordnet. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
-      }
-
-      priorWorkshops.forEach(priorWorkshop => {
-        const priorCannot = cannotBeParallel[priorWorkshop] || [];
-        const currentCannot = cannotBeParallel[currentWorkshop] || [];
-        if (priorCannot.includes(currentWorkshop) || currentCannot.includes(priorWorkshop)) {
-          if (bandResult.assignments[student] === currentWorkshop) {
-            delete bandResult.assignments[student];
-            const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
-            if (bandResult.kap) {
-              bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
-            }
-            if (bandResult.num1 > 0) bandResult.num1--;
-            if (bandResult.num2 > 0) bandResult.num2--;
-            conflicts.push(`${student} wurde ${priorWorkshop} und ${currentWorkshop} parallel zugeordnet, aber diese können nicht parallel belegt werden. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
-          }
-        }
-      });
     });
   });
+  return priorWorkshopsByStudent;
+}
 
-  allProblems.push(...conflicts.map(p => ({ message: p, band: 'all', bandLabel: 'Alle Bänder' })));
+function courseAllowsSelfParallel(workshopName, allowSelfParallel) {
+  return allowSelfParallel?.[workshopName] === true;
+}
 
+function rememberClassOnUpload(map, student, trimesterKey, bandId, className) {
+  if (!student || !className) return;
+  const existing = map[student] || {};
+  const uploads = Array.isArray(existing.uploads) ? existing.uploads.filter(
+    entry => !(entry.trimesterKey === trimesterKey && entry.bandId === bandId)
+  ) : [];
+  uploads.push({ trimesterKey, bandId, className });
+  const latest = [...uploads].sort((a, b) => String(a.trimesterKey).localeCompare(String(b.trimesterKey))).pop();
+  map[student] = {
+    trimesterKey: latest.trimesterKey,
+    className: latest.className,
+    uploads,
+  };
+}
+
+function choiceColumnIndexes(header) {
+  const normalized = (header || []).map(cell => String(cell || '').trim().toLowerCase());
+  const classIdx = normalized.findIndex(cell => cell === 'klasse' || cell === 'class' || cell === 'klassen');
+  let choiceIdxs = normalized
+    .map((cell, index) => ({ cell, index }))
+    .filter(({ cell, index }) => index !== 0 && index !== classIdx && (/^wahl/.test(cell) || /^wunsch/.test(cell) || /^q\d+$/.test(cell)))
+    .map(({ index }) => index);
+  if (!choiceIdxs.length) {
+    choiceIdxs = normalized.map((_, index) => index).filter(index => index !== 0 && index !== classIdx);
+  }
+  return { classIdx, choiceIdxs };
+}
+
+function buildModifiedChoicesForBand(choicesMapFull, bandId, priorWorkshopsByStudent, cannotBeParallel, allowSelfParallel = {}) {
+  const bandChoices = choicesMapFull[bandId] || {};
+  const modifiedChoices = {};
+  Object.keys(bandChoices).forEach(student => {
+    if (student.startsWith('__')) return;
+    const originalChoices = bandChoices[student] || [];
+    if (!Array.isArray(originalChoices)) return;
+    const priorWorkshops = priorWorkshopsByStudent[student] || [];
+    let filteredChoices = originalChoices.filter(choice => {
+      if (!priorWorkshops.includes(choice)) return true;
+      return courseAllowsSelfParallel(choice, allowSelfParallel);
+    });
+    priorWorkshops.forEach(priorWorkshop => {
+      const cannotList = cannotBeParallel[priorWorkshop] || [];
+      filteredChoices = filteredChoices.filter(choice => !cannotList.includes(choice));
+    });
+    if (filteredChoices.length > 0) {
+      modifiedChoices[student] = filteredChoices;
+    }
+  });
+  Object.keys(bandChoices).forEach(student => {
+    if (!(priorWorkshopsByStudent[student]?.length) && bandChoices[student] && !modifiedChoices[student]) {
+      modifiedChoices[student] = bandChoices[student];
+    }
+  });
+  return modifiedChoices;
+}
+
+function applyCrossBandConflictFixes(bandResult, bandId, priorWorkshopsByStudent, cannotBeParallel, workshops, allowSelfParallel = {}) {
+  const conflicts = [];
+  Object.keys(bandResult.assignments).forEach(student => {
+    const currentWorkshop = bandResult.assignments[student];
+    const priorWorkshops = priorWorkshopsByStudent[student] || [];
+    if (!currentWorkshop) return;
+
+    if (priorWorkshops.includes(currentWorkshop) && !courseAllowsSelfParallel(currentWorkshop, allowSelfParallel)) {
+      delete bandResult.assignments[student];
+      const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
+      if (bandResult.kap) {
+        bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
+      }
+      if (bandResult.num1 > 0) bandResult.num1--;
+      if (bandResult.num2 > 0) bandResult.num2--;
+      conflicts.push(`${student} wurde in mehreren Bändern ${currentWorkshop} zugeordnet. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
+      return;
+    }
+
+    priorWorkshops.forEach(priorWorkshop => {
+      const priorCannot = cannotBeParallel[priorWorkshop] || [];
+      const currentCannot = cannotBeParallel[currentWorkshop] || [];
+      if (priorCannot.includes(currentWorkshop) || currentCannot.includes(priorWorkshop)) {
+        if (bandResult.assignments[student] === currentWorkshop) {
+          delete bandResult.assignments[student];
+          const capacity = getWorkshopCapacity(workshops[currentWorkshop], currentWorkshop);
+          if (bandResult.kap) {
+            bandResult.kap[currentWorkshop] = (bandResult.kap[currentWorkshop] || capacity) + 1;
+          }
+          if (bandResult.num1 > 0) bandResult.num1--;
+          if (bandResult.num2 > 0) bandResult.num2--;
+          conflicts.push(`${student} wurde ${priorWorkshop} und ${currentWorkshop} parallel zugeordnet, aber diese können nicht parallel belegt werden. Die Zuordnung in ${getBandLabel(bandId)} wurde entfernt - bitte manuell zuordnen.`);
+        }
+      }
+    });
+  });
+  return conflicts;
+}
+
+function recomputeAutoResultTotals(bandResults, problems, activeBandIds, students) {
   let totalFirst = 0;
   let totalSecond = 0;
   activeBandIds.forEach(bandId => {
@@ -1323,18 +1719,129 @@ function autoAssignAllBands(students, workshops, prevAssignments, prereqs, choic
   const percentFirst = students.length > 0 && activeBandIds.length > 0
     ? (totalFirst / (students.length * activeBandIds.length)) * 100
     : 0;
-
   return {
     bandResults,
-    problems: allProblems,
+    problems,
     totalFirst,
     totalSecond,
     percentFirst,
     activeBandIds,
-    // Backward compatibility for code expecting erstesBand/zweitesBand
     erstesBand: bandResults[activeBandIds[0]] || { assignments: {}, problems: [], num1: 0, num2: 0 },
     zweitesBand: bandResults[activeBandIds[1]] || { assignments: {}, problems: [], num1: 0, num2: 0 },
   };
+}
+
+function sortStudentsByPriority(students, studentPriorityScores) {
+  return [...students].sort((a, b) => {
+    const scoreA = studentPriorityScores[a] || 5;
+    const scoreB = studentPriorityScores[b] || 5;
+    return scoreB - scoreA;
+  });
+}
+
+function autoAssignOneBandWithPrior(
+  students,
+  workshops,
+  prevAssignments,
+  prereqs,
+  choicesMapFull,
+  studentAssistants,
+  studentPriorityScores,
+  rules,
+  confirmedAssignments,
+  schoolYearStart,
+  schoolYearEnd,
+  currentTrimester,
+  cannotBeParallel,
+  bandId,
+  priorWorkshopsByStudent,
+  studentClasses = {},
+  studentEnrollmentYears = {},
+  wahlCount = 2,
+  allowSelfParallel = {}
+) {
+  const sortedStudents = sortStudentsByPriority(students, studentPriorityScores);
+  const modifiedChoices = buildModifiedChoicesForBand(choicesMapFull, bandId, priorWorkshopsByStudent, cannotBeParallel, allowSelfParallel);
+  const bandResult = autoAssignSingleBand(
+    sortedStudents,
+    workshops,
+    prevAssignments,
+    prereqs,
+    modifiedChoices,
+    studentAssistants,
+    studentPriorityScores,
+    rules,
+    confirmedAssignments,
+    schoolYearStart,
+    schoolYearEnd,
+    currentTrimester,
+    bandId,
+    studentClasses,
+    studentEnrollmentYears,
+    wahlCount
+  );
+  const conflictMessages = applyCrossBandConflictFixes(
+    bandResult,
+    bandId,
+    priorWorkshopsByStudent,
+    cannotBeParallel,
+    workshops,
+    allowSelfParallel
+  );
+  const problems = [
+    ...bandResult.problems.map(p => ({ message: p, band: bandId, bandLabel: getBandLabel(bandId) })),
+    ...conflictMessages.map(p => ({ message: p, band: 'all', bandLabel: 'Alle Bänder' })),
+  ];
+  return { bandResult, problems };
+}
+
+// Auto-assignment algorithm for all active bands
+function autoAssignAllBands(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, cannotBeParallel = {}, activeBandIds = DEFAULT_BAND_IDS, studentClasses = {}, studentEnrollmentYears = {}, wahlCount = 2, allowSelfParallel = {}) {
+  const bandResults = {};
+  const cumulativeByStudent = {};
+  const allProblems = [];
+
+  activeBandIds.forEach(bandId => {
+    const priorWorkshopsByStudent = {};
+    Object.keys(cumulativeByStudent).forEach(student => {
+      priorWorkshopsByStudent[student] = [...(cumulativeByStudent[student] || [])];
+    });
+
+    const { bandResult, problems } = autoAssignOneBandWithPrior(
+      students,
+      workshops,
+      prevAssignments,
+      prereqs,
+      choicesMap,
+      studentAssistants,
+      studentPriorityScores,
+      rules,
+      confirmedAssignments,
+      schoolYearStart,
+      schoolYearEnd,
+      currentTrimester,
+      cannotBeParallel,
+      bandId,
+      priorWorkshopsByStudent,
+      studentClasses,
+      studentEnrollmentYears,
+      wahlCount,
+      allowSelfParallel
+    );
+
+    bandResults[bandId] = bandResult;
+    allProblems.push(...problems);
+
+    Object.keys(bandResult.assignments).forEach(student => {
+      const workshop = bandResult.assignments[student];
+      if (workshop) {
+        if (!cumulativeByStudent[student]) cumulativeByStudent[student] = [];
+        cumulativeByStudent[student].push(workshop);
+      }
+    });
+  });
+
+  return recomputeAutoResultTotals(bandResults, allProblems, activeBandIds, students);
 }
 
 // Legacy alias kept for external references
@@ -1344,8 +1851,9 @@ function autoAssignBothBands(students, workshops, prevAssignments, prereqs, choi
 }
 
 // Single Band auto-assignment algorithm
-function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, band) {
-  // choicesMap: { studentName: [choice1, choice2] }
+function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, choicesMap, studentAssistants = {}, studentPriorityScores = {}, rules = [], confirmedAssignments = {}, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses = {}, studentEnrollmentYears = {}, wahlCount = 2) {
+  const maxWahl = Math.min(Math.max(1, wahlCount || 2), 5);
+  // choicesMap: { studentName: [choice1, choice2, ...] }
   // Filter workshops to only those available in this band
   const availableWorkshops = {};
   const kap = {};
@@ -1370,9 +1878,9 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   // Filter choices to only include workshops available in this band
   const filteredChoicesMap = {};
   Object.keys(choicesMap).forEach(student => {
-    const choices = (choicesMap[student] || []).filter(choice => 
-      isWorkshopAvailableInBand(workshops, choice, band)
-    );
+    const choices = (choicesMap[student] || [])
+      .slice(0, maxWahl)
+      .filter(choice => isWorkshopAvailableInBand(workshops, choice, band));
     if (choices.length > 0) {
       filteredChoicesMap[student] = choices;
     } else if (choicesMap[student] && choicesMap[student].length > 0) {
@@ -1384,11 +1892,11 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   // Use filtered choices map
   const workingChoicesMap = filteredChoicesMap;
 
-  // sanitize choices: if both choices same -> reduce to single
+  // sanitize: if all listed choices are identical -> reduce to single
   for (const s of students) {
     const choices = workingChoicesMap[s] || [];
-    if (choices.length === 2 && choices[0] === choices[1]) {
-      problems.push(`${s} hat zweimal die gleiche Werkstatt ${choices[0]} gewählt.`);
+    if (choices.length > 1 && choices.every(c => c === choices[0])) {
+      problems.push(`${s} hat ${choices.length}× dieselbe Werkstatt ${choices[0]} gewählt.`);
       workingChoicesMap[s] = [choices[0]];
     }
   }
@@ -1415,7 +1923,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   // Check which students need to follow Folgekurs rules
   const studentsWithFolgekurs = new Set();
   students.forEach(s => {
-    const required = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band);
+    const required = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses, studentEnrollmentYears);
     if (required) {
       studentsWithFolgekurs.add(s);
     }
@@ -1477,7 +1985,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   // Also prioritize students with Folgekurs rules
   for (const s of studentsNeedingAssistance) {
     // Check if student needs to follow a Folgekurs rule
-    const requiredFolgekurs = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band);
+    const requiredFolgekurs = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses, studentEnrollmentYears);
     if (requiredFolgekurs) {
       // Student must be assigned to the Folgekurs
       if (requiredFolgekurs.band === null || requiredFolgekurs.band === band) {
@@ -1517,7 +2025,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
   // Second pass: Assign regular students
   for (const s of regularStudents) {
     // Check if student needs to follow a Folgekurs rule
-    const requiredFolgekurs = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band);
+    const requiredFolgekurs = getRequiredFolgekurs(s, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses, studentEnrollmentYears);
     if (requiredFolgekurs) {
       // Student must be assigned to the Folgekurs
       if (requiredFolgekurs.band === null || requiredFolgekurs.band === band) {
@@ -1546,23 +2054,28 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
     }
   }
 
-  // Third pass: Second choice allocation for those without assignment
-  for (const s of students) {
-    if (!(s in assignments)) {
+  // Further passes: 2nd, 3rd, … choice for students still unassigned
+  for (let rank = 1; rank < maxWahl; rank++) {
+    for (const s of students) {
+      if (s in assignments) continue;
       const ch = workingChoicesMap[s] || [];
-      if (ch.length > 1) {
-        const second = ch[1];
-        if (!hasPrereqs(s, second, prevAssignments, prereqs)) {
-          problems.push(`${s} erfüllt die Voraussetzungen für ${second} nicht.`);
+      if (ch.length > rank) {
+        const choice = ch[rank];
+        if (!hasPrereqs(s, choice, prevAssignments, prereqs)) {
+          problems.push(`${s} erfüllt die Voraussetzungen für ${choice} (${rank + 1}. Wahl) nicht.`);
           continue;
         }
-        if ((kap[second] ?? 0) > 0) {
-          assignments[s] = second;
-          kap[second] -= 1;
+        if ((kap[choice] ?? 0) > 0) {
+          assignments[s] = choice;
+          kap[choice] -= 1;
           num2 += 1;
         }
-      } else {
-        problems.push(`${s} hat seine erste Wahl nicht bekommen und hat keine gültige zweite Wahl.`);
+      } else if (ch.length === rank) {
+        problems.push(
+          rank === 1
+            ? `${s} hat seine erste Wahl nicht bekommen und hat keine gültige zweite Wahl.`
+            : `${s} hat keine gültige ${rank + 1}. Wahl (höhere Wahlen nicht vergeben).`
+        );
       }
     }
   }
@@ -1589,15 +2102,34 @@ export default function WerkstattVerwaltungApp() {
     const [prevAssignments, setPrevAssignments] = useState(() => load(LS_KEYS.prevAssignments, {}));
     const [prereqs, setPrereqs] = useState(() => load(LS_KEYS.prereqs, {}));
     const [cannotBeParallel, setCannotBeParallel] = useState(() => load(LS_KEYS.cannotBeParallel, {}));
+    const [allowSelfParallel, setAllowSelfParallel] = useState(() => load(LS_KEYS.allowSelfParallel, {}));
     const [confirmedAssignments, setConfirmedAssignments] = useState(() => load(LS_KEYS.assignments, {}));
     const [rules, setRules] = useState(() => load(LS_KEYS.rules, []));
     const [studentTrimesters, setStudentTrimesters] = useState(() => load(LS_KEYS.studentTrimesters, {}));
     const [studentAssistants, setStudentAssistants] = useState(() => load(LS_KEYS.studentAssistants, {})); // NEW
   const [studentClasses, setStudentClasses] = useState(() => load(LS_KEYS.studentClasses, {})); // NEW: store class information for each student
+  const [classRegistry, setClassRegistry] = useState(() => {
+    const saved = load(LS_KEYS.classRegistry, null);
+    const fromStudents = Object.values(load(LS_KEYS.studentClasses, {})).filter(Boolean);
+    const base = Array.isArray(saved) ? saved : [];
+    return [...new Set([...base, ...fromStudents])].sort();
+  });
+  const [klassenStufenPool, setKlassenStufenPool] = useState(() => {
+    const saved = load(LS_KEYS.klassenStufenPool, null);
+    const registry = load(LS_KEYS.classRegistry, []);
+    return mergeKlassenStufenPool(saved, registry);
+  });
+  const [studentEnrollmentYears, setStudentEnrollmentYears] = useState(() => load(LS_KEYS.studentEnrollmentYears, {}));
+  const [studentClassUploadInfo, setStudentClassUploadInfo] = useState(() => load(LS_KEYS.studentClassUploadInfo, {}));
   const [studentPriorityScores, setStudentPriorityScores] = useState(() => load(LS_KEYS.studentPriorityScores, {})); // NEW: map student -> priority score (1-10)
   const [studentPriorityScoresLastChanged, setStudentPriorityScoresLastChanged] = useState(() => load(LS_KEYS.studentPriorityScoresLastChanged, {})); // NEW: map student -> ISO timestamp of last manual change
   const [workshopColors, setWorkshopColors] = useState(() => load(LS_KEYS.workshopColors, {})); // NEW: map workshop -> color hex
-  const [studentComments, setStudentComments] = useState(() => load(LS_KEYS.studentComments, {})); // NEW: map student -> comment/notes
+  const [studentComments, setStudentComments] = useState(() => load(LS_KEYS.studentComments, {}));
+  const loadChoicesForTrimesterKey = useCallback((planKey) => {
+    if (!planKey) return createEmptyChoicesMap();
+    return normalizeBandDataObject(load(`wv_choices_${planKey}`, createEmptyChoicesMap()));
+  }, []);
+  const [manualRuleChecks, setManualRuleChecks] = useState(() => load(LS_KEYS.manualRuleChecks, {})); // NEW: map student -> comment/notes
   const [workshopTeachers, setWorkshopTeachers] = useState(() => {
     const loaded = load(LS_KEYS.workshopTeachers, {});
     console.log('🔵 Initializing workshopTeachers state:', loaded);
@@ -1611,6 +2143,21 @@ export default function WerkstattVerwaltungApp() {
     return loaded;
   }); // NEW: map workshop -> room number
   const [archivedWorkshops, setArchivedWorkshops] = useState(() => load(LS_KEYS.archivedWorkshops, {})); // NEW: map workshop -> { capacity, archivedAt }
+  const [trimesterPlans, setTrimesterPlans] = useState(() => {
+    const saved = normalizeTrimesterPlans(load(LS_KEYS.trimesterPlans, {}));
+    const assignments = load(LS_KEYS.assignments, {});
+    const registry = load(LS_KEYS.classRegistry, []);
+    const pool = mergeKlassenStufenPool(load(LS_KEYS.klassenStufenPool, null), registry);
+    const workshopsLoaded = load(LS_KEYS.workshops, {});
+    return buildInferredTrimesterPlans({
+      confirmedAssignments: assignments,
+      choicesBySlotKey: collectChoicesBySlotKeyFromStorage(),
+      klassenStufenPool: pool,
+      workshopNames: Object.keys(workshopsLoaded),
+      existingPlans: saved,
+    });
+  });
+  const [selectedTrimesterPlanKey, setSelectedTrimesterPlanKey] = useState(null);
   const [isInitialMount, setIsInitialMount] = useState(true);
   const defaultSchoolYear = getDefaultSchoolYear();
   const [reportYearTrimester, setReportYearTrimester] = useState({ 
@@ -1625,15 +2172,34 @@ export default function WerkstattVerwaltungApp() {
     useEffect(() => save(LS_KEYS.prevAssignments, prevAssignments), [prevAssignments]);
     useEffect(() => save(LS_KEYS.prereqs, prereqs), [prereqs]);
     useEffect(() => save(LS_KEYS.cannotBeParallel, cannotBeParallel), [cannotBeParallel]);
+    useEffect(() => save(LS_KEYS.allowSelfParallel, allowSelfParallel), [allowSelfParallel]);
     useEffect(() => save(LS_KEYS.assignments, confirmedAssignments), [confirmedAssignments]);
     useEffect(() => save(LS_KEYS.rules, rules), [rules]);
     useEffect(() => save(LS_KEYS.studentTrimesters, studentTrimesters), [studentTrimesters]);
     useEffect(() => save(LS_KEYS.studentAssistants, studentAssistants), [studentAssistants]); // persist assistants
   useEffect(() => save(LS_KEYS.studentClasses, studentClasses), [studentClasses]); // persist student classes
+  useEffect(() => save(LS_KEYS.studentEnrollmentYears, studentEnrollmentYears), [studentEnrollmentYears]);
+  useEffect(() => save(LS_KEYS.classRegistry, classRegistry), [classRegistry]);
+  useEffect(() => save(LS_KEYS.klassenStufenPool, klassenStufenPool), [klassenStufenPool]);
+  useEffect(() => {
+    setKlassenStufenPool(prev => mergeKlassenStufenPool(prev, classRegistry));
+  }, [classRegistry]);
+  useEffect(() => save(LS_KEYS.studentClassUploadInfo, studentClassUploadInfo), [studentClassUploadInfo]);
+
+  useEffect(() => {
+    const fromStudents = Object.values(studentClasses).filter(Boolean);
+    if (fromStudents.length === 0) return;
+    setClassRegistry(prev => {
+      const merged = [...new Set([...prev, ...fromStudents])].sort();
+      if (merged.length === prev.length && merged.every((v, i) => v === prev[i])) return prev;
+      return merged;
+    });
+  }, [studentClasses]);
   useEffect(() => save(LS_KEYS.studentPriorityScores, studentPriorityScores), [studentPriorityScores]); // persist priority scores
   useEffect(() => save(LS_KEYS.studentPriorityScoresLastChanged, studentPriorityScoresLastChanged), [studentPriorityScoresLastChanged]); // persist last changed timestamps
   useEffect(() => save(LS_KEYS.workshopColors, workshopColors), [workshopColors]); // persist workshop colors
   useEffect(() => save(LS_KEYS.studentComments, studentComments), [studentComments]); // persist student comments
+  useEffect(() => save(LS_KEYS.manualRuleChecks, manualRuleChecks), [manualRuleChecks]); // persist manual rule checks
   // Skip saving on initial mount to avoid overwriting loaded data
   useEffect(() => {
     if (isInitialMount) {
@@ -1654,7 +2220,8 @@ export default function WerkstattVerwaltungApp() {
     console.log('💾 useEffect: Using key:', LS_KEYS.workshopRooms);
     save(LS_KEYS.workshopRooms, workshopRooms);
   }, [workshopRooms, isInitialMount]); // persist workshop rooms
-  useEffect(() => save(LS_KEYS.archivedWorkshops, archivedWorkshops), [archivedWorkshops]); // persist archived workshops
+  useEffect(() => save(LS_KEYS.archivedWorkshops, archivedWorkshops), [archivedWorkshops]);
+  useEffect(() => save(LS_KEYS.trimesterPlans, trimesterPlans), [trimesterPlans]); // persist archived workshops
 
     // Students tab state
     const [query, setQuery] = useState("");
@@ -1670,12 +2237,17 @@ export default function WerkstattVerwaltungApp() {
       return filtered;
     }, [students, query, classFilter, studentClasses]);
     const [selectedStudent, setSelectedStudent] = useState(null);
-    
-    // Get unique classes for filter
-    const uniqueClasses = useMemo(() => {
-      const classes = new Set(Object.values(studentClasses).filter(c => c));
-      return Array.from(classes).sort();
-    }, [studentClasses]);
+    const [showAddClassForm, setShowAddClassForm] = useState(false);
+    const [showEinschulungsjahrInfo, setShowEinschulungsjahrInfo] = useState(false);
+    const [newRegistryClassName, setNewRegistryClassName] = useState('');
+
+    useEffect(() => {
+      setShowAddClassForm(false);
+      setShowEinschulungsjahrInfo(false);
+      setNewRegistryClassName('');
+    }, [selectedStudent]);
+
+    const uniqueClasses = useMemo(() => classRegistry, [classRegistry]);
 
   // Wahl tab state
   const [uploadedChoices, setUploadedChoices] = useState(() => createEmptyChoicesMap());
@@ -1691,7 +2263,100 @@ export default function WerkstattVerwaltungApp() {
       trimester: 1 
     };
   });
+  const wahlTrimesterKey = useMemo(
+    () => getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester),
+    [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester]
+  );
+
+  useEffect(() => {
+    const additions = [];
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const storageKey = localStorage.key(index);
+      if (!storageKey || !storageKey.startsWith('wv_choices_')) continue;
+      let data;
+      try {
+        data = JSON.parse(localStorage.getItem(storageKey) || 'null');
+      } catch {
+        continue;
+      }
+      if (!data || typeof data !== 'object') continue;
+      const slot = storageKey.slice('wv_choices_'.length);
+      let dirty = false;
+      if (!data.__classes || typeof data.__classes !== 'object') {
+        data.__classes = {};
+        dirty = true;
+      }
+      ALL_BAND_IDS.forEach(bandId => {
+        const band = data[bandId];
+        if (!band || typeof band !== 'object') return;
+        if (!data.__classes[bandId]) {
+          data.__classes[bandId] = {};
+          dirty = true;
+        }
+        Object.entries(band).forEach(([student, choices]) => {
+          if (!Array.isArray(choices) || !choices.length) return;
+          if (!data.__classes[bandId][student] && studentClasses[student]) {
+            data.__classes[bandId][student] = studentClasses[student];
+            dirty = true;
+          }
+          const className = data.__classes[bandId][student];
+          if (!className) return;
+          additions.push({ student, trimesterKey: slot, bandId, className });
+        });
+      });
+      if (dirty) {
+        localStorage.setItem(storageKey, JSON.stringify(data));
+        if (slot === wahlTrimesterKey) setUploadedChoices(data);
+      }
+    }
+    if (!additions.length) return;
+    setStudentClassUploadInfo(prev => {
+      const next = { ...prev };
+      let changed = false;
+      additions.forEach(({ student, trimesterKey, bandId, className }) => {
+        const before = JSON.stringify(next[student] || null);
+        rememberClassOnUpload(next, student, trimesterKey, bandId, className);
+        if (JSON.stringify(next[student]) !== before) changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [studentClasses, wahlTrimesterKey]);
+  const activeTrimesterPlan = useMemo(
+    () => trimesterPlans[wahlTrimesterKey] || null,
+    [trimesterPlans, wahlTrimesterKey]
+  );
+  const wahlTrimesterDefined = !!activeTrimesterPlan;
+  const activeTrimesterWahlCount = useMemo(
+    () => getTrimesterWahlCount(activeTrimesterPlan),
+    [activeTrimesterPlan]
+  );
+  const definedTrimesterList = useMemo(() => plansAsSortedList(trimesterPlans), [trimesterPlans]);
   const [activeBand, setActiveBand] = useState('erstesBand'); // Track which Band is currently active
+  const wahlVisibleWorkshops = useMemo(
+    () =>
+      Object.keys(workshops).filter(w => {
+        if (!isWorkshopAvailableInBand(workshops, w, activeBand)) return false;
+        if (activeTrimesterPlan?.courses[w]?.enabled === false) return false;
+        if (activeTrimesterPlan && !isWorkshopOfferedInBand(activeTrimesterPlan, w, activeBand)) return false;
+        return true;
+      }),
+    [workshops, activeBand, activeTrimesterPlan]
+  );
+  const getWahlWorkshopCapacity = useCallback(
+    (name) => {
+      if (activeTrimesterPlan) {
+        return resolveTrimesterWorkshopMeta(activeTrimesterPlan, name, activeBand, {
+          workshops,
+          workshopTeachers,
+          workshopRooms,
+          workshopColors,
+          getWorkshopCapacity,
+        }).capacity;
+      }
+      return getWorkshopCapacity(workshops[name], name);
+    },
+    [activeTrimesterPlan, activeBand, workshops, workshopTeachers, workshopRooms, workshopColors]
+  );
   const [checkedWarnings, setCheckedWarnings] = useState(() => {
     // Load checked warnings from localStorage
     const saved = localStorage.getItem('wv_checkedWarnings');
@@ -1699,6 +2364,20 @@ export default function WerkstattVerwaltungApp() {
   }); // Track which warnings have been checked off
   const [showTrimesterDialog, setShowTrimesterDialog] = useState(false);
   const [showReportsTrimesterDialog, setShowReportsTrimesterDialog] = useState(false);
+  const [dataMenuOpen, setDataMenuOpen] = useState(false);
+  const dataMenuRef = React.useRef(null);
+  const importDataInputRef = React.useRef(null);
+
+  useEffect(() => {
+    if (!dataMenuOpen) return;
+    const onDocClick = (e) => {
+      if (dataMenuRef.current && !dataMenuRef.current.contains(e.target)) {
+        setDataMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [dataMenuOpen]);
   const [dialogYearTrimester, setDialogYearTrimester] = useState(() => {
     const defaultSchoolYear = getDefaultSchoolYear();
     return { 
@@ -1710,26 +2389,43 @@ export default function WerkstattVerwaltungApp() {
   const hasVisitedWahlTab = useRef(false);
   const currentTrimesterKeyRef = useRef(null);
   const isLoadingChoicesRef = useRef(false);
-  
-  // Update priority scores based on assignment results (Option 1: Symmetrisches System)
-  const updatePriorityScores = useCallback((assignments, choices, bandIds = activeBandIds) => {
-    const updatedScores = { ...studentPriorityScores };
-    
+  const activeBandRef = useRef(activeBand);
+  activeBandRef.current = activeBand;
+
+  const assignmentsForPriority = useMemo(() => {
+    const merged = { ...confirmedAssignments };
+    const key = getSchoolYearKey(
+      yearTrimester.schoolYearStart,
+      yearTrimester.schoolYearEnd,
+      yearTrimester.trimester
+    );
+    if (tab === 'wahl' && hasAnyAssignmentInBands(dragAssignments, activeBandIds)) {
+      merged[key] = {
+        ...(merged[key] || {}),
+        assignments: dragAssignments,
+        timestamp: merged[key]?.timestamp || new Date().toISOString(),
+        bands: activeBandIds,
+      };
+    }
+    return merged;
+  }, [confirmedAssignments, dragAssignments, yearTrimester, tab, activeBandIds]);
+
+  const priorityScoresByStudent = useMemo(() => {
+    const scores = {};
     students.forEach(student => {
-      if (!updatedScores[student]) {
-        updatedScores[student] = 5;
-      }
+      scores[student] = computePriorityScoreFromFullHistory(
+        student,
+        assignmentsForPriority,
+        load,
+        studentAssistants
+      );
     });
-    
-    students.forEach(student => {
-      const newScore = applyPriorityScoreChangeForStudent(assignments, choices, bandIds, student, updatedScores[student] || 5);
-      if (newScore !== (updatedScores[student] || 5)) {
-        updatedScores[student] = newScore;
-      }
-    });
-    
-    setStudentPriorityScores(updatedScores);
-  }, [studentPriorityScores, students, activeBandIds]);
+    return scores;
+  }, [students, assignmentsForPriority, studentAssistants]);
+
+  useEffect(() => {
+    setStudentPriorityScores(priorityScoresByStudent);
+  }, [priorityScoresByStudent]);
   
   // Load assignments and choices when year/trimester changes or when first visiting wahl tab
   useEffect(() => {
@@ -1742,14 +2438,16 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    const planForKey = trimesterPlans[key];
     
     // Update the ref immediately to prevent auto-save from saving old data
     currentTrimesterKeyRef.current = key;
     
+    const planBandIds = planForKey ? getPlanBandIds(planForKey) : null;
     // Load assignments for this year/trimester
     const savedAssignments = confirmedAssignments[key];
     if (savedAssignments && savedAssignments.assignments) {
-      const savedBandIds = getPayloadBandIds(savedAssignments);
+      const savedBandIds = planBandIds?.length ? planBandIds : getPayloadBandIds(savedAssignments);
       setActiveBandCount(savedBandIds.length);
 
       if (hasAnyAssignmentInBands(savedAssignments.assignments, savedBandIds)) {
@@ -1758,8 +2456,12 @@ export default function WerkstattVerwaltungApp() {
         setDragAssignments(createStudentBandAssignments(students, savedBandIds));
       }
     } else {
-      setActiveBandCount(DEFAULT_BAND_COUNT);
-      setDragAssignments(createStudentBandAssignments(students, getBandIds(DEFAULT_BAND_COUNT)));
+      const bandIds = planBandIds?.length ? planBandIds : getBandIds(DEFAULT_BAND_COUNT);
+      setActiveBandCount(bandIds.length);
+      setDragAssignments(createStudentBandAssignments(students, bandIds));
+    }
+    if (planBandIds?.length && !planBandIds.includes(activeBandRef.current)) {
+      setActiveBand(planBandIds[0]);
     }
     
     const choicesKey = `wv_choices_${key}`;
@@ -1802,7 +2504,20 @@ export default function WerkstattVerwaltungApp() {
     
     // Reset upload summary
     setUploadSummary(null);
-  }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, confirmedAssignments, students, tab]);
+  }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, confirmedAssignments, students, tab, trimesterPlans]);
+
+  useEffect(() => {
+    if (tab !== 'wahl' || definedTrimesterList.length === 0) return;
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    if (!trimesterPlans[key]) {
+      const p = definedTrimesterList[0];
+      setYearTrimester({
+        schoolYearStart: p.schoolYearStart,
+        schoolYearEnd: p.schoolYearEnd,
+        trimester: p.trimester,
+      });
+    }
+  }, [tab, definedTrimesterList, trimesterPlans, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester]);
   
   // Auto-save dragAssignments whenever they change (with debouncing to avoid too many saves)
   useEffect(() => {
@@ -1835,12 +2550,10 @@ export default function WerkstattVerwaltungApp() {
       setConfirmedAssignments(payload);
       
       exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments, activeBandIds);
-      
-      updatePriorityScores(dragAssignments, uploadedChoices, activeBandIds);
     }, 500);
     
     return () => clearTimeout(timeoutId);
-  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices, updatePriorityScores, activeBandIds]);
+  }, [dragAssignments, yearTrimester, tab, hasVisitedWahlTab, uploadedChoices, activeBandIds]);
   
   // Save assignments when leaving wahl tab (immediate save, no debounce)
   useEffect(() => {
@@ -1864,9 +2577,7 @@ export default function WerkstattVerwaltungApp() {
     setConfirmedAssignments(payload);
     
     exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, dragAssignments, activeBandIds);
-    
-    updatePriorityScores(dragAssignments, uploadedChoices, activeBandIds);
-  }, [tab, dragAssignments, uploadedChoices, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatePriorityScores, activeBandIds]);
+  }, [tab, dragAssignments, uploadedChoices, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, activeBandIds]);
   
   // Save choices when they change (per year/trimester)
   useEffect(() => {
@@ -1913,6 +2624,8 @@ export default function WerkstattVerwaltungApp() {
   const topScrollbarRef = React.useRef(null);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
   const [studentSearchQuery, setStudentSearchQuery] = useState(''); // Search query for students in drag & drop
+  const [addUnassignedQuery, setAddUnassignedQuery] = useState('');
+  const [extraUnassignedByBand, setExtraUnassignedByBand] = useState({});
   const studentCardRefs = React.useRef({}); // Refs for student cards to enable scrolling
 
   // Update window width on resize
@@ -1921,6 +2634,11 @@ export default function WerkstattVerwaltungApp() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  useEffect(() => {
+    setExtraUnassignedByBand({});
+    setAddUnassignedQuery('');
+  }, [wahlTrimesterKey]);
 
   // Sync top and bottom scrollbars
   useEffect(() => {
@@ -1962,6 +2680,56 @@ export default function WerkstattVerwaltungApp() {
     return trimmed;
   }
 
+  // Helper to parse CSV text with automatic separator detection (semicolon, comma, tab)
+  function parseCsvText(text) {
+    const lines = text.split(/\r?\n/).filter(line => line.trim());
+    if (lines.length === 0) return [];
+
+    // Detect separator from first non-empty line
+    const firstLine = lines[0];
+    let commaCount = 0;
+    let semiCount = 0;
+    let tabCount = 0;
+    let inQ = false;
+    for (let i = 0; i < firstLine.length; i++) {
+      const c = firstLine[i];
+      if (c === '"') inQ = !inQ;
+      else if (!inQ) {
+        if (c === ';') semiCount++;
+        else if (c === ',') commaCount++;
+        else if (c === '\t') tabCount++;
+      }
+    }
+
+    let sep = ';';
+    if (tabCount > semiCount && tabCount > commaCount) sep = '\t';
+    else if (commaCount > semiCount) sep = ',';
+
+    return lines.map(line => {
+      const values = [];
+      let current = '';
+      let inQuotes = false;
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+          if (inQuotes && line[i + 1] === '"') {
+            current += '"';
+            i++;
+          } else {
+            inQuotes = !inQuotes;
+          }
+        } else if (char === sep && !inQuotes) {
+          values.push(current.trim());
+          current = '';
+        } else {
+          current += char;
+        }
+      }
+      values.push(current.trim());
+      return values;
+    });
+  }
+
   // Helper function to parse file (CSV or XLSX) into data array
   async function parseFileToData(file) {
     return new Promise((resolve, reject) => {
@@ -1986,38 +2754,21 @@ export default function WerkstattVerwaltungApp() {
         reader.readAsArrayBuffer(file);
       } else {
         // CSV file
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const text = e.target.result;
-        const lines = text.split(/\r?\n/).filter(line => line.trim());
-        
-        if (lines.length === 0) {
-              reject(new Error('Die Datei ist leer.'));
-          return;
-        }
-
-        // Parse CSV (handle semicolon or comma separator)
-        const data = lines.map(line => {
-          const values = [];
-          let current = '';
-          let inQuotes = false;
-          
-          for (let i = 0; i < line.length; i++) {
-            const char = line[i];
-            if (char === '"') {
-              inQuotes = !inQuotes;
-            } else if ((char === ';' || char === ',') && !inQuotes) {
-              values.push(current.trim());
-              current = '';
-            } else {
-              current += char;
+        const reader = new FileReader();
+        reader.onload = (e) => {
+          try {
+            const text = e.target.result;
+            if (text.includes('\uFFFD')) {
+              // Try reading as windows-1252 if UTF-8 resulted in invalid replacement characters
+              const altReader = new FileReader();
+              altReader.onload = (e2) => {
+                resolve(parseCsvText(e2.target.result));
+              };
+              altReader.onerror = () => resolve(parseCsvText(text));
+              altReader.readAsText(file, 'windows-1252');
+              return;
             }
-          }
-          values.push(current.trim());
-          return values;
-        });
-            resolve(data);
+            resolve(parseCsvText(text));
           } catch (error) {
             reject(error);
           }
@@ -2028,196 +2779,441 @@ export default function WerkstattVerwaltungApp() {
     });
   }
 
+  // Auto-detect column mappings based on headers heuristics
+  function autoDetectColumnMappings(headers) {
+    const mappings = {};
+    const usedRoles = new Set();
+
+    headers.forEach((h, idx) => {
+      const lower = String(h || '').toLowerCase().trim();
+      let role = 'ignore';
+
+      if (lower === 'vorname' || lower.startsWith('vorname') || lower === 'firstname' || lower === 'first name') {
+        role = 'firstName';
+      } else if (lower === 'nachname' || lower.startsWith('nachname') || lower === 'lastname' || lower === 'last name' || lower === 'familienname') {
+        role = 'lastName';
+      } else if (
+        lower === 'name' || lower.includes('schüler') || lower.includes('schueler') ||
+        lower.includes('student') || lower.includes('teilnehmer') || lower.includes('name des kindes') ||
+        lower.includes('name der schülerin') || lower.includes('vollständiger name') || lower.includes('ganzer name')
+      ) {
+        role = 'name';
+      } else if (
+        lower.includes('klasse') || lower.includes('class') || lower.includes('lerngruppe') ||
+        lower.includes('jahrgang') || lower.includes('gruppe') || lower.includes('jg')
+      ) {
+        role = 'class';
+      } else if (
+        lower === 'q1' || lower.startsWith('q1') || lower.includes('q1') ||
+        lower.includes('erst') || lower.includes('1. wahl') || lower.includes('1. wunsch') ||
+        lower.includes('1.wahl') || lower.includes('1.wunsch') || lower.includes('wahl 1') ||
+        lower.includes('wunsch 1') || lower.includes('prio 1') || lower.includes('priorität 1') ||
+        lower.includes('erstpräferenz') || lower === 'wahl1' || lower === 'wunsch1'
+      ) {
+        role = 'q1';
+      } else if (
+        lower === 'q2' || lower.startsWith('q2') || lower.includes('q2') ||
+        lower.includes('zweit') || lower.includes('2. wahl') || lower.includes('2. wunsch') ||
+        lower.includes('2.wahl') || lower.includes('2.wunsch') || lower.includes('wahl 2') ||
+        lower.includes('wunsch 2') || lower.includes('prio 2') || lower.includes('priorität 2') ||
+        lower.includes('zweitpräferenz') || lower === 'wahl2' || lower === 'wunsch2'
+      ) {
+        role = 'q2';
+      } else if (
+        lower === 'q3' || lower.startsWith('q3') || lower.includes('q3') ||
+        lower.includes('dritt') || lower.includes('3. wahl') || lower.includes('3. wunsch') ||
+        lower.includes('3.wahl') || lower.includes('3.wunsch') || lower.includes('wahl 3') ||
+        lower.includes('wunsch 3') || lower.includes('prio 3') || lower.includes('priorität 3') ||
+        lower.includes('drittpräferenz') || lower === 'wahl3' || lower === 'wunsch3'
+      ) {
+        role = 'q3';
+      } else if (
+        lower.includes('begleit') || lower.includes('assist') || lower.includes('inklusion') || lower.includes('sonderpäd')
+      ) {
+        role = 'assistant';
+      }
+
+      if (role !== 'ignore' && !usedRoles.has(role)) {
+        mappings[idx] = role;
+        usedRoles.add(role);
+      } else {
+        mappings[idx] = 'ignore';
+      }
+    });
+
+    // Fallback if Q1 not matched: look after class column or at the end
+    if (!usedRoles.has('q1')) {
+      const classIdx = Object.keys(mappings).find(k => mappings[k] === 'class');
+      if (classIdx !== undefined) {
+        const remaining = headers.map((_, i) => i).filter(i => mappings[i] === 'ignore' && i > parseInt(classIdx, 10));
+        if (remaining.length >= 2) {
+          mappings[remaining[0]] = 'q1';
+          mappings[remaining[1]] = 'q2';
+        } else if (remaining.length === 1) {
+          mappings[remaining[0]] = 'q1';
+        }
+      } else if (headers.length >= 3) {
+        const remaining = headers.map((_, i) => i).filter(i => mappings[i] === 'ignore');
+        if (remaining.length >= 2) {
+          mappings[remaining[remaining.length - 2]] = 'q1';
+          mappings[remaining[remaining.length - 1]] = 'q2';
+        } else if (remaining.length === 1) {
+          mappings[remaining[remaining.length - 1]] = 'q1';
+        }
+      }
+    }
+
+    return mappings;
+  }
+
+  // State for Column Mapping Modal
+  const [columnMappingModal, setColumnMappingModal] = useState({
+    isOpen: false,
+    fileName: '',
+    targetBand: '',
+    rawData: [],
+    headers: [],
+    previewRows: [],
+    totalRows: 0,
+    mappings: {},
+  });
+
+  function handleColumnMappingChange(colIdx, newRole) {
+    setColumnMappingModal(prev => {
+      const nextMappings = { ...prev.mappings };
+      if (newRole !== 'ignore') {
+        Object.keys(nextMappings).forEach(k => {
+          if (parseInt(k, 10) !== colIdx && nextMappings[k] === newRole) {
+            nextMappings[k] = 'ignore';
+          }
+        });
+      }
+      nextMappings[colIdx] = newRole;
+      return { ...prev, mappings: nextMappings };
+    });
+  }
+
+  function handleResetColumnMappings() {
+    setColumnMappingModal(prev => ({
+      ...prev,
+      mappings: autoDetectColumnMappings(prev.headers),
+    }));
+  }
+
+  function handleConfirmColumnMapping() {
+    const { rawData, targetBand, mappings } = columnMappingModal;
+
+    let nameIdx = -1;
+    let firstNameIdx = -1;
+    let lastNameIdx = -1;
+    let klasseIdx = -1;
+    let q1Idx = -1;
+    let q2Idx = -1;
+    let q3Idx = -1;
+    let assistantIdx = -1;
+
+    Object.entries(mappings).forEach(([idxStr, role]) => {
+      const idx = parseInt(idxStr, 10);
+      if (role === 'name') nameIdx = idx;
+      if (role === 'firstName') firstNameIdx = idx;
+      if (role === 'lastName') lastNameIdx = idx;
+      if (role === 'class') klasseIdx = idx;
+      if (role === 'q1') q1Idx = idx;
+      if (role === 'q2') q2Idx = idx;
+      if (role === 'q3') q3Idx = idx;
+      if (role === 'assistant') assistantIdx = idx;
+    });
+
+    const hasName = nameIdx !== -1 || (firstNameIdx !== -1 && lastNameIdx !== -1);
+    if (!hasName) {
+      alert('Fehler: Bitte ordnen Sie eine Spalte für den Schüler-Namen (oder Vor- und Nachname) zu.');
+      return;
+    }
+    if (q1Idx === -1) {
+      alert('Fehler: Bitte ordnen Sie mindestens eine Spalte für den 1. Wunsch (Q1) zu.');
+      return;
+    }
+
+    const wahlCount = activeTrimesterWahlCount;
+    if (wahlCount >= 2 && q2Idx === -1) {
+      alert(`Für dieses Trimester sind ${wahlCount} Wahlen pro Schüler vorgesehen. Bitte ordnen Sie auch eine Spalte für den 2. Wunsch (Q2) zu.`);
+      return;
+    }
+    if (wahlCount >= 3 && q3Idx === -1) {
+      alert(`Für dieses Trimester sind ${wahlCount} Wahlen pro Schüler vorgesehen. Bitte ordnen Sie auch eine Spalte für den 3. Wunsch (Q3) zu.`);
+      return;
+    }
+
+    const summary = {
+      newStudents: [],
+      updatedClasses: [],
+      newWorkshops: [],
+      updatedChoices: 0,
+      inferredEnrollmentYears: [],
+      errors: [],
+      band: getBandLabel(targetBand),
+    };
+
+    const trimesterKey = getSchoolYearKey(
+      yearTrimester.schoolYearStart,
+      yearTrimester.schoolYearEnd,
+      yearTrimester.trimester
+    );
+    const newStudentClasses = { ...studentClasses };
+    const newClassUploadInfo = { ...studentClassUploadInfo };
+    const newStudents = [...students];
+    const newWorkshops = { ...workshops };
+    const newStudentAssistants = { ...studentAssistants };
+    const newEnrollmentYears = { ...studentEnrollmentYears };
+    const bandMap = { ...(uploadedChoices[targetBand] || {}) };
+    const bandClasses = { ...(uploadedChoices.__classes?.[targetBand] || {}) };
+
+    for (let i = 1; i < rawData.length; i++) {
+      const row = rawData[i];
+      if (!row || row.length === 0) continue;
+
+      let studentName = '';
+      if (nameIdx !== -1) {
+        studentName = String(row[nameIdx] || '').trim();
+      } else if (firstNameIdx !== -1 && lastNameIdx !== -1) {
+        const fn = String(row[firstNameIdx] || '').trim();
+        const ln = String(row[lastNameIdx] || '').trim();
+        studentName = `${fn} ${ln}`.trim();
+      }
+      if (!studentName) continue;
+
+      const className = klasseIdx >= 0 ? String(row[klasseIdx] || '').trim() : '';
+      const q1Value = q1Idx >= 0 ? String(row[q1Idx] || '').trim() : '';
+      const q2Value = q2Idx >= 0 ? String(row[q2Idx] || '').trim() : '';
+      const q3Value = q3Idx >= 0 ? String(row[q3Idx] || '').trim() : '';
+
+      if (assistantIdx >= 0) {
+        const assVal = String(row[assistantIdx] || '').toLowerCase().trim();
+        if (
+          assVal === 'ja' ||
+          assVal === 'yes' ||
+          assVal === 'true' ||
+          assVal === '1' ||
+          assVal === 'x' ||
+          assVal.includes('begleit') ||
+          assVal.includes('bedarf')
+        ) {
+          newStudentAssistants[studentName] = true;
+        }
+      }
+
+      const q1 = parseChoiceValue(q1Value);
+      const q2 = parseChoiceValue(q2Value);
+      const q3 = parseChoiceValue(q3Value);
+
+      if (!newStudents.includes(studentName)) {
+        newStudents.push(studentName);
+        summary.newStudents.push(studentName);
+      }
+
+      const recordedClass = className || newStudentClasses[studentName] || '';
+      if (className) {
+        if (newStudentClasses[studentName] !== className) {
+          const oldClass = newStudentClasses[studentName];
+          newStudentClasses[studentName] = className;
+          summary.updatedClasses.push({ student: studentName, old: oldClass || null, new: className });
+        }
+      }
+      if (recordedClass) {
+        bandClasses[studentName] = recordedClass;
+        rememberClassOnUpload(newClassUploadInfo, studentName, trimesterKey, targetBand, recordedClass);
+      }
+
+      const choices = [];
+      if (q1) choices.push(q1);
+      if (wahlCount >= 2 && q2) choices.push(q2);
+      if (wahlCount >= 3 && q3) choices.push(q3);
+
+      const normalizedChoices = choices
+        .map((choice) => {
+          if (!choice) return '';
+          const normalized = parseChoiceValue(choice);
+          const existingWorkshop = Object.keys(newWorkshops).find((w) => {
+            return parseChoiceValue(w).toLowerCase() === normalized.toLowerCase();
+          });
+          if (!existingWorkshop && normalized) {
+            newWorkshops[normalized] = 6;
+            if (!summary.newWorkshops.includes(normalized)) {
+              summary.newWorkshops.push(normalized);
+            }
+          }
+          return existingWorkshop || normalized;
+        })
+        .filter(Boolean)
+        .slice(0, wahlCount);
+
+      if (normalizedChoices.length > 0) {
+        bandMap[studentName] = normalizedChoices;
+        summary.updatedChoices++;
+
+        if (className && getStudentEinschulungsjahr(studentName, newEnrollmentYears) == null) {
+          const inferred = inferEinschulungsjahrFromWahlClass(
+            yearTrimester.schoolYearStart,
+            className
+          );
+          if (inferred != null) {
+            newEnrollmentYears[studentName] = inferred;
+            summary.inferredEnrollmentYears.push({
+              student: studentName,
+              year: inferred,
+              className,
+            });
+          }
+        }
+      }
+    }
+
+    setStudents(newStudents);
+    setStudentClasses(newStudentClasses);
+    setStudentEnrollmentYears(newEnrollmentYears);
+    setStudentClassUploadInfo(newClassUploadInfo);
+    setWorkshops(newWorkshops);
+    if (assistantIdx >= 0) {
+      setStudentAssistants(newStudentAssistants);
+    }
+    setUploadedChoices((prev) => {
+      const updated = {
+        ...prev,
+        [targetBand]: bandMap,
+        __classes: {
+          ...(prev.__classes || {}),
+          [targetBand]: bandClasses,
+        },
+      };
+      const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+      const choicesKey = `wv_choices_${key}`;
+      try {
+        localStorage.setItem(choicesKey, JSON.stringify(updated));
+        console.log(`💾 Saved choices to ${choicesKey}:`, updated);
+      } catch (error) {
+        console.error(`Failed to save choices to ${choicesKey}:`, error);
+      }
+      return updated;
+    });
+
+    setUploadSummary(summary);
+    setColumnMappingModal((prev) => ({ ...prev, isOpen: false }));
+
+    if (fileInputRefs.current[targetBand]) {
+      fileInputRefs.current[targetBand].value = '';
+    }
+
+    alert(`Datei erfolgreich hochgeladen für ${summary.band}!\n${summary.updatedChoices} Schüler-Wahlen aktualisiert.`);
+  }
+
   async function handleFileUpload(event, targetBand) {
     const file = event.target.files[0];
     if (!file) return;
 
     try {
       const data = await parseFileToData(file);
-      
-      if (data.length === 0) {
+      if (!data || data.length === 0) {
         alert('Die Datei ist leer.');
         return;
       }
 
-      // Expected format: Name; Klasse; Übermittelt, Klasse, Q1, Q2
-      // We ignore "Übermittelt" column
-      const header = data[0].map(h => String(h).toLowerCase().trim());
-      
-      // Find column indices
-      const nameIdx = header.findIndex(h => h.includes('name') || h.includes('schüler') || h.includes('student'));
-      const klasseIdx = header.findIndex(h => h.includes('klasse') || h.includes('class'));
-      const q1Idx = header.findIndex(h => {
-        const hLower = h.toLowerCase();
-        return hLower === 'q1' || hLower.includes('q1') || hLower.startsWith('q1');
-      });
-      const q2Idx = header.findIndex(h => {
-        const hLower = h.toLowerCase();
-        return hLower === 'q2' || hLower.includes('q2') || hLower.startsWith('q2');
-      });
-
-      // Fallback: if Q1/Q2 not found by name, try positional (after Klasse)
-      let finalQ1Idx = q1Idx;
-      let finalQ2Idx = q2Idx;
-      
-      if (finalQ1Idx === -1 || finalQ2Idx === -1) {
-        // Try to find Q1/Q2 after Klasse column
-        // Format: Name, Klasse, Übermittelt, Klasse, Q1, Q2
-        // Look for columns that might be Q1/Q2 by position
-        if (klasseIdx !== -1 && data[0].length > klasseIdx + 3) {
-          // Check if columns after Klasse might be Q1/Q2
-          // Usually Q1/Q2 are the last two columns
-          if (data[0].length >= 2) {
-            finalQ1Idx = data[0].length - 2; // Second to last
-            finalQ2Idx = data[0].length - 1; // Last
-          }
-        }
-      }
-
-      if (nameIdx === -1) {
-        alert('Fehler: Spalte "Name", "Student" oder "Schüler" nicht gefunden.');
+      const validRows = data.filter((row) => Array.isArray(row) && row.some((cell) => String(cell || '').trim() !== ''));
+      if (validRows.length < 2) {
+        alert('Die Datei muss mindestens eine Kopfzeile und eine Datenzeile enthalten.');
         return;
       }
 
-      if (finalQ1Idx === -1 || finalQ2Idx === -1) {
-        alert('Fehler: Spalten "Q1" und "Q2" nicht gefunden. Erwartetes Format: Name; Klasse; Übermittelt, Klasse, Q1, Q2');
-          return;
-        }
+      const headers = validRows[0].map((h) => String(h || '').trim());
+      const previewRows = validRows.slice(1, 6);
+      const initialMappings = autoDetectColumnMappings(headers);
 
-        const summary = {
-          newStudents: [],
-          updatedClasses: [],
-          newWorkshops: [],
-          updatedChoices: 0,
-        errors: [],
-        band: targetBand === 'erstesBand' ? 'Erstes Band' : 'Zweites Band'
-        };
-
-        const newStudentClasses = { ...studentClasses };
-        const newStudents = [...students];
-        const newWorkshops = { ...workshops };
-      const bandMap = { ...uploadedChoices[targetBand] };
-
-        // Process each row
-        for (let i = 1; i < data.length; i++) {
-          const row = data[i];
-          if (row.length < 2) continue;
-
-        const studentName = String(row[nameIdx] || '').trim();
-          if (!studentName) continue;
-
-        const className = klasseIdx >= 0 ? String(row[klasseIdx] || '').trim() : '';
-        const q1Value = finalQ1Idx >= 0 ? String(row[finalQ1Idx] || '').trim() : '';
-        const q2Value = finalQ2Idx >= 0 ? String(row[finalQ2Idx] || '').trim() : '';
-
-        // Parse Q1 and Q2, ignoring text after colon
-        const q1 = parseChoiceValue(q1Value);
-        const q2 = parseChoiceValue(q2Value);
-
-          // Add new student if doesn't exist
-          if (!students.includes(studentName)) {
-            newStudents.push(studentName);
-            summary.newStudents.push(studentName);
-            // Initialize priority score for new student
-            if (!studentPriorityScores[studentName]) {
-              setStudentPriorityScores(prev => ({ ...prev, [studentName]: 5 }));
-            }
-          }
-
-          // Update class information
-          if (className && newStudentClasses[studentName] !== className) {
-            const oldClass = newStudentClasses[studentName];
-            newStudentClasses[studentName] = className;
-            if (oldClass) {
-              summary.updatedClasses.push({ student: studentName, old: oldClass, new: className });
-            } else {
-              summary.updatedClasses.push({ student: studentName, old: null, new: className });
-            }
-          }
-
-        // Collect workshop choices (already normalized by parseChoiceValue)
-        const choices = [];
-        if (q1) choices.push(q1);
-        if (q2) choices.push(q2);
-
-        // Normalize choices and check/add workshops
-        const normalizedChoices = choices.map(choice => {
-          if (!choice) return '';
-          const normalized = parseChoiceValue(choice);
-          
-          // Check if workshop exists (normalize existing workshop names for comparison)
-          const existingWorkshop = Object.keys(workshops).find(w => {
-            const normalizedW = parseChoiceValue(w);
-            return normalizedW === normalized;
-          });
-          
-          // If workshop doesn't exist, add it with normalized name
-          if (!existingWorkshop && normalized) {
-            newWorkshops[normalized] = 6; // Default capacity
-            if (!summary.newWorkshops.includes(normalized)) {
-              summary.newWorkshops.push(normalized);
-            }
-          }
-          
-          return normalized;
-        }).filter(c => c); // Remove empty choices
-
-        // Update choices for the target band (using normalized names)
-        if (normalizedChoices.length > 0) {
-          bandMap[studentName] = normalizedChoices;
-            summary.updatedChoices++;
-          }
-        }
-
-        // Apply all changes
-        setStudents(newStudents);
-    setStudentClasses(newStudentClasses);
-        setWorkshops(newWorkshops);
-      setUploadedChoices(prev => {
-        const updated = {
-          ...prev,
-          [targetBand]: bandMap
-        };
-        // Save choices for current year/trimester immediately
-        const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-        const choicesKey = `wv_choices_${key}`;
-        // Save immediately to localStorage (bypassing the useEffect to avoid race conditions)
-        try {
-          localStorage.setItem(choicesKey, JSON.stringify(updated));
-          console.log(`💾 Saved choices to ${choicesKey}:`, updated);
-        } catch (error) {
-          console.error(`Failed to save choices to ${choicesKey}:`, error);
-        }
-        return updated;
+      setColumnMappingModal({
+        isOpen: true,
+        fileName: file.name,
+        targetBand: targetBand,
+        rawData: validRows,
+        headers: headers,
+        previewRows: previewRows,
+        totalRows: validRows.length - 1,
+        mappings: initialMappings,
       });
-        setUploadSummary(summary);
 
-        // Reset file input
-      if (fileInputRefs.current[targetBand]) {
-        fileInputRefs.current[targetBand].value = '';
+      if (event.target) {
+        event.target.value = '';
       }
-
-      alert(`Datei erfolgreich hochgeladen für ${summary.band}!\n${summary.updatedChoices} Schüler aktualisiert.`);
-      } catch (error) {
+    } catch (error) {
       alert(`Fehler beim Lesen der Datei: ${error.message}`);
-      }
+    }
+  }
+
+  function persistAutoResultForTrimester(res) {
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    save(`wv_autoResult_${key}`, res, false);
+  }
+
+  function applyBandResultToDragAssignments(bandId, bandResult, prevDrag) {
+    const next = JSON.parse(JSON.stringify(prevDrag));
+    if (!next[bandId]) next[bandId] = {};
+    students.forEach(s => {
+      next[bandId][s] = bandResult.assignments[s] || 'Nicht Zugeordnen';
+    });
+    return next;
+  }
+
+  function runAutoAssignForBand(bandId) {
+    const choicesCopy = JSON.parse(JSON.stringify(uploadedChoices));
+    const priorWorkshopsByStudent = buildPriorWorkshopsFromOtherBands(
+      dragAssignments,
+      activeBandIds,
+      bandId,
+      students
+    );
+    const { bandResult, problems: bandProblems } = autoAssignOneBandWithPrior(
+      students,
+      workshops,
+      prevAssignments,
+      prereqs,
+      choicesCopy,
+      studentAssistants,
+      priorityScoresByStudent,
+      rules,
+      confirmedAssignments,
+      yearTrimester.schoolYearStart,
+      yearTrimester.schoolYearEnd,
+      yearTrimester.trimester,
+      cannotBeParallel,
+      bandId,
+      priorWorkshopsByStudent,
+      studentClasses,
+      studentEnrollmentYears,
+      activeTrimesterWahlCount,
+      allowSelfParallel
+    );
+
+    setAutoResult(prev => {
+      const bandResults = { ...(prev?.bandResults || {}), [bandId]: bandResult };
+      const keptProblems = (prev?.problems || []).filter(p => typeof p !== 'object' || p.band !== bandId);
+      const problems = [...keptProblems, ...bandProblems];
+      const res = recomputeAutoResultTotals(bandResults, problems, activeBandIds, students);
+      persistAutoResultForTrimester(res);
+      return res;
+    });
+
+    setDragAssignments(prev => applyBandResultToDragAssignments(bandId, bandResult, prev));
   }
 
   function runAutoAssign() {
-    const res = autoAssignAllBands(students, workshops, prevAssignments, prereqs, JSON.parse(JSON.stringify(uploadedChoices)), studentAssistants, studentPriorityScores, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, cannotBeParallel, activeBandIds);
+    const res = autoAssignAllBands(students, workshops, prevAssignments, prereqs, JSON.parse(JSON.stringify(uploadedChoices)), studentAssistants, priorityScoresByStudent, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, cannotBeParallel, activeBandIds, studentClasses, studentEnrollmentYears, activeTrimesterWahlCount, allowSelfParallel);
     setAutoResult(res);
-    
-    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-    const autoResultKey = `wv_autoResult_${key}`;
-    save(autoResultKey, res, false);
-    
+    persistAutoResultForTrimester(res);
+
     const newDragAssignments = createEmptyBandMap();
     for (const s of students) {
       activeBandIds.forEach(bandId => {
-        newDragAssignments[bandId][s] = res.bandResults[bandId]?.assignments[s] || "Nicht Zugeordnen";
+        newDragAssignments[bandId][s] = res.bandResults[bandId]?.assignments[s] || 'Nicht Zugeordnen';
       });
     }
-    
+
     setDragAssignments(newDragAssignments);
   }
   
@@ -2232,53 +3228,13 @@ export default function WerkstattVerwaltungApp() {
   }
 
 
-  // Calculate priority score history over time for a student
-  function calculatePriorityScoreHistory(student) {
-    if (studentAssistants[student]) {
-      const historyEntries = [];
-      Object.entries(confirmedAssignments).forEach(([slotKey, payload]) => {
-        if (payload.timestamp) {
-          historyEntries.push({ slotKey, timestamp: payload.timestamp });
-        }
-      });
-      historyEntries.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-      return historyEntries.map(() => ({ score: 10, timestamp: '' }));
-    }
-    
-    const lastChanged = studentPriorityScoresLastChanged[student];
-    const startScore = lastChanged && studentPriorityScores[student] !== undefined 
-      ? studentPriorityScores[student] 
-      : 5;
-    
-    const historyEntries = buildPriorityHistoryEntries(student, confirmedAssignments, lastChanged);
-    const scoreHistory = [];
-    let currentScore = startScore;
-    
-    historyEntries.forEach(entry => {
-      currentScore = applyHistoryEntryScoreChange(entry, student, currentScore, load);
-      scoreHistory.push({ score: currentScore, timestamp: entry.timestamp });
-    });
-    
-    return scoreHistory;
-  }
-  
-  // Calculate priority score dynamically based on history
   function calculatePriorityScoreFromHistory(student) {
-    if (studentAssistants[student]) {
-      return 10;
-    }
-    
-    const lastChanged = studentPriorityScoresLastChanged[student];
-    let currentScore = lastChanged && studentPriorityScores[student] !== undefined
-      ? studentPriorityScores[student]
-      : 5;
-    
-    const historyEntries = buildPriorityHistoryEntries(student, confirmedAssignments, lastChanged);
-    historyEntries.forEach(entry => {
-      currentScore = applyHistoryEntryScoreChange(entry, student, currentScore, load);
-    });
-    
-    return Math.round(currentScore * 10) / 10;
+    return priorityScoresByStudent[student] ?? computePriorityScoreFromFullHistory(
+      student,
+      assignmentsForPriority,
+      load,
+      studentAssistants
+    );
   }
   
 
@@ -3057,13 +4013,20 @@ export default function WerkstattVerwaltungApp() {
         [LS_KEYS.studentTrimesters]: studentTrimesters,
         [LS_KEYS.studentAssistants]: studentAssistants,
         [LS_KEYS.studentClasses]: studentClasses,
+        [LS_KEYS.studentEnrollmentYears]: studentEnrollmentYears,
+        [LS_KEYS.classRegistry]: classRegistry,
+        [LS_KEYS.klassenStufenPool]: klassenStufenPool,
+        [LS_KEYS.studentClassUploadInfo]: studentClassUploadInfo,
+        [LS_KEYS.allowSelfParallel]: allowSelfParallel,
         [LS_KEYS.studentPriorityScores]: studentPriorityScores,
         [LS_KEYS.studentPriorityScoresLastChanged]: studentPriorityScoresLastChanged,
         [LS_KEYS.workshopColors]: workshopColors,
         [LS_KEYS.studentComments]: studentComments,
+        [LS_KEYS.manualRuleChecks]: manualRuleChecks,
         [LS_KEYS.workshopTeachers]: workshopTeachers,
         [LS_KEYS.workshopRooms]: workshopRooms,
         [LS_KEYS.archivedWorkshops]: archivedWorkshops,
+        [LS_KEYS.trimesterPlans]: trimesterPlans,
         [LS_KEYS.assignments]: confirmedAssignments
       };
       
@@ -3101,6 +4064,11 @@ export default function WerkstattVerwaltungApp() {
       if (importedData[LS_KEYS.studentTrimesters]) setStudentTrimesters(importedData[LS_KEYS.studentTrimesters]);
       if (importedData[LS_KEYS.studentAssistants]) setStudentAssistants(importedData[LS_KEYS.studentAssistants]);
       if (importedData[LS_KEYS.studentClasses]) setStudentClasses(importedData[LS_KEYS.studentClasses]);
+      if (importedData[LS_KEYS.studentEnrollmentYears]) setStudentEnrollmentYears(importedData[LS_KEYS.studentEnrollmentYears]);
+      if (importedData[LS_KEYS.classRegistry]) setClassRegistry(importedData[LS_KEYS.classRegistry]);
+      if (importedData[LS_KEYS.klassenStufenPool]) setKlassenStufenPool(importedData[LS_KEYS.klassenStufenPool]);
+      if (importedData[LS_KEYS.studentClassUploadInfo]) setStudentClassUploadInfo(importedData[LS_KEYS.studentClassUploadInfo]);
+      if (importedData[LS_KEYS.allowSelfParallel]) setAllowSelfParallel(importedData[LS_KEYS.allowSelfParallel]);
       if (importedData[LS_KEYS.studentPriorityScores]) setStudentPriorityScores(importedData[LS_KEYS.studentPriorityScores]);
       // Import studentPriorityScoresLastChanged if present (backward compatible - skip if not present)
       if (importedData[LS_KEYS.studentPriorityScoresLastChanged]) {
@@ -3108,24 +4076,50 @@ export default function WerkstattVerwaltungApp() {
       }
       if (importedData[LS_KEYS.workshopColors]) setWorkshopColors(importedData[LS_KEYS.workshopColors]);
       if (importedData[LS_KEYS.studentComments]) setStudentComments(importedData[LS_KEYS.studentComments]);
+      if (importedData[LS_KEYS.manualRuleChecks]) setManualRuleChecks(importedData[LS_KEYS.manualRuleChecks]);
       if (importedData[LS_KEYS.workshopTeachers]) setWorkshopTeachers(importedData[LS_KEYS.workshopTeachers]);
       if (importedData[LS_KEYS.workshopRooms]) setWorkshopRooms(importedData[LS_KEYS.workshopRooms]);
       if (importedData[LS_KEYS.archivedWorkshops]) setArchivedWorkshops(importedData[LS_KEYS.archivedWorkshops]);
+      const nextAssignments = importedData.assignments || confirmedAssignments;
       if (importedData.assignments) {
         setConfirmedAssignments(importedData.assignments);
       }
-      
+
       // Import choices for all trimesters (stored with pattern wv_choices_${key})
       Object.keys(importedData).forEach(key => {
         if (key.startsWith('wv_choices_')) {
           const choicesData = importedData[key];
-          if (choicesData && (Object.keys(choicesData.erstesBand || {}).length > 0 || Object.keys(choicesData.zweitesBand || {}).length > 0)) {
+          if (choicesData && hasAnyChoicesInBands(choicesData, ALL_BAND_IDS)) {
             save(key, choicesData, false); // Don't auto-export choices
           }
         }
       });
-      
-      alert('Daten wurden erfolgreich importiert!');
+
+      const importedWorkshops = importedData[LS_KEYS.workshops] || workshops;
+      const importedRegistry = importedData[LS_KEYS.classRegistry] || classRegistry;
+      const importedPool = mergeKlassenStufenPool(
+        importedData[LS_KEYS.klassenStufenPool] ?? klassenStufenPool,
+        importedRegistry
+      );
+      const explicitPlans = importedData[LS_KEYS.trimesterPlans]
+        ? normalizeTrimesterPlans(importedData[LS_KEYS.trimesterPlans])
+        : {};
+      const mergedPlans = buildInferredTrimesterPlans({
+        confirmedAssignments: nextAssignments,
+        choicesBySlotKey: collectChoicesBySlotKeyFromImport(importedData),
+        klassenStufenPool: importedPool,
+        workshopNames: Object.keys(importedWorkshops),
+        existingPlans: explicitPlans,
+      });
+      setTrimesterPlans(mergedPlans);
+      save(LS_KEYS.trimesterPlans, mergedPlans, false);
+
+      const inferredOnly = !importedData[LS_KEYS.trimesterPlans];
+      alert(
+        inferredOnly
+          ? 'Daten importiert. Trimester-Pläne wurden aus Zuordnungen/Wahl-CSVs ergänzt (älteres ZIP ohne trimester-plans.json).'
+          : 'Daten wurden erfolgreich importiert (inkl. Trimester-Konfiguration).'
+      );
       
       // Reset file input
       event.target.value = '';
@@ -3147,14 +4141,20 @@ export default function WerkstattVerwaltungApp() {
     if (!isWorkshopAvailableInBand(workshops, workshopName, band)) {
       return { ok: false, reason: `Diese Werkstatt ist in ${getBandLabel(band)} nicht verfügbar.` };
     }
+    if (activeTrimesterPlan?.courses[workshopName]?.enabled === false) {
+      return { ok: false, reason: 'Kurs ist in diesem Trimester nicht angeboten.' };
+    }
+    if (activeTrimesterPlan && !isWorkshopOfferedInBand(activeTrimesterPlan, workshopName, band)) {
+      return { ok: false, reason: `Kurs ist in ${getBandLabel(band)} für dieses Trimester nicht verfügbar.` };
+    }
     
     for (const otherBandId of activeBandIds) {
       if (otherBandId === band) continue;
       const otherBandAssignment = dragAssignments[otherBandId]?.[student];
       if (!otherBandAssignment || isNotAssigned(otherBandAssignment)) continue;
 
-      if (otherBandAssignment === workshopName) {
-        return { ok: false, reason: `Konflikt: Bereits in ${getBandLabel(otherBandId)} zugeordnet.` };
+      if (otherBandAssignment === workshopName && !courseAllowsSelfParallel(workshopName, allowSelfParallel)) {
+        return { ok: false, reason: `Nicht parallel zu sich selbst: bereits in ${getBandLabel(otherBandId)} zugeordnet.` };
       }
 
       const otherBandCannotBeParallel = cannotBeParallel[otherBandAssignment] || [];
@@ -3168,7 +4168,10 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const counts = getCurrentWorkshopCounts();
-    const capacity = getWorkshopCapacity(workshops[workshopName], workshopName);
+    const capacity =
+      band === activeBand
+        ? getWahlWorkshopCapacity(workshopName)
+        : getWorkshopCapacity(workshops[workshopName], workshopName);
     if ((counts[workshopName] ?? 0) >= capacity) {
       return { ok: false, reason: `Kapazität erreicht (${counts[workshopName]}/${capacity})` };
     }
@@ -3180,7 +4183,7 @@ export default function WerkstattVerwaltungApp() {
       return { ok: false, reason: `Voraussetzungen für ${workshopName} nicht erfüllt.` };
     }
 
-    const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, band);
+    const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, band, studentClasses, studentEnrollmentYears);
     if (requiredFolgekurs) {
       const isFulfilled = isFolgekursFulfilled(requiredFolgekurs, dragAssignments, student, activeBandIds);
       if (requiredFolgekurs.band !== null) {
@@ -3349,7 +4352,7 @@ export default function WerkstattVerwaltungApp() {
       }));
     } else {
       // Also check for Folgekurs rule violations even if other checks pass
-      const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, activeBand);
+      const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, activeBand, studentClasses, studentEnrollmentYears);
       if (requiredFolgekurs) {
         // Check if the rule is already fulfilled in the current assignments (after this drop)
         const updatedAssignments = { ...dragAssignments };
@@ -3507,8 +4510,6 @@ export default function WerkstattVerwaltungApp() {
         setConfirmedAssignments(payload);
         
         exportAssignment(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, updatedAssignments, activeBandIds);
-        
-        updatePriorityScores(updatedAssignments, uploadedChoices, activeBandIds);
       }, 100);
       
       // Return updated state
@@ -3544,6 +4545,8 @@ export default function WerkstattVerwaltungApp() {
     });
   }
   
+  const [activeWorkshopEditor, setActiveWorkshopEditor] = useState(null);
+
   function addWorkshop(name, cap) {
     if (!name) return;
     setWorkshops(prev => ({
@@ -3553,7 +4556,47 @@ export default function WerkstattVerwaltungApp() {
         availableBands: [...ALL_BAND_IDS]
       }
     }));
+    setActiveWorkshopEditor({ type: 'active', name });
   }
+
+  function duplicateWorkshop(sourceName) {
+    const source = workshops[sourceName];
+    if (!source) return null;
+    const taken = new Set([...Object.keys(workshops), ...Object.keys(archivedWorkshops)]);
+    let copyName = `${sourceName} (Kopie)`;
+    let suffix = 2;
+    while (taken.has(copyName)) {
+      copyName = `${sourceName} (Kopie ${suffix})`;
+      suffix += 1;
+    }
+    const capacity = getWorkshopCapacity(source, sourceName);
+    const availableBands = [...getWorkshopAvailableBands(source, sourceName)];
+    setWorkshops(prev => ({
+      ...prev,
+      [copyName]: { capacity, availableBands },
+    }));
+    if (workshopColors[sourceName]) {
+      setWorkshopColors(prev => ({ ...prev, [copyName]: workshopColors[sourceName] }));
+    }
+    if (workshopTeachers[sourceName]) {
+      setWorkshopTeachers(prev => ({ ...prev, [copyName]: workshopTeachers[sourceName] }));
+    }
+    if (workshopRooms[sourceName]) {
+      setWorkshopRooms(prev => ({ ...prev, [copyName]: workshopRooms[sourceName] }));
+    }
+    if (prereqs[sourceName]?.length) {
+      setPrereqs(prev => ({ ...prev, [copyName]: [...prereqs[sourceName]] }));
+    }
+    if (cannotBeParallel[sourceName]?.length) {
+      setCannotBeParallel(prev => ({ ...prev, [copyName]: [...cannotBeParallel[sourceName]] }));
+    }
+    if (allowSelfParallel[sourceName]) {
+      setAllowSelfParallel(prev => ({ ...prev, [copyName]: true }));
+    }
+    setActiveWorkshopEditor({ type: 'active', name: copyName });
+    return copyName;
+  }
+
   // Check if a workshop has been taken by any student
   function hasWorkshopBeenTaken(workshopName) {
     for (const [, payload] of Object.entries(confirmedAssignments)) {
@@ -3611,6 +4654,7 @@ export default function WerkstattVerwaltungApp() {
       const copy = { ...workshops };
       delete copy[name];
       setWorkshops(copy);
+      setActiveWorkshopEditor({ type: 'archived', name });
       
       // Keep color, teacher, and room data (they stay with archived workshop)
     } else {
@@ -3638,6 +4682,9 @@ export default function WerkstattVerwaltungApp() {
         delete copy[name];
         return copy;
       });
+      setActiveWorkshopEditor(prev =>
+        prev?.type === 'active' && prev.name === name ? null : prev
+      );
     }
   }
 
@@ -3660,6 +4707,7 @@ export default function WerkstattVerwaltungApp() {
       delete copy[name];
       return copy;
     });
+    setActiveWorkshopEditor({ type: 'active', name });
   }
 
   function permanentlyDeleteArchivedWorkshop(name) {
@@ -3757,6 +4805,9 @@ export default function WerkstattVerwaltungApp() {
       delete copy[name];
       return copy;
     });
+    setActiveWorkshopEditor(prev =>
+      prev?.type === 'archived' && prev.name === name ? null : prev
+    );
   }
   function updateWorkshopColor(name, color) {
     setWorkshopColors(prev => ({ ...prev, [name]: color }));
@@ -3780,20 +4831,320 @@ export default function WerkstattVerwaltungApp() {
     });
   }
 
+  const [workshopRenameDialog, setWorkshopRenameDialog] = useState(null);
+
+  function renameKeyInRecord(record, oldName, newName) {
+    if (!record || !(oldName in record)) return record;
+    const next = { ...record };
+    next[newName] = next[oldName];
+    delete next[oldName];
+    return next;
+  }
+
+  function replaceWorkshopInBandAssignments(assignments, oldName, newName) {
+    if (!assignments || typeof assignments !== 'object') return assignments;
+    if (isLegacySingleBandAssignments(assignments)) {
+      const next = { ...assignments };
+      Object.keys(next).forEach(student => {
+        if (next[student] === oldName) next[student] = newName;
+      });
+      return next;
+    }
+    const next = { ...assignments };
+    ALL_BAND_IDS.forEach(bandId => {
+      if (!next[bandId] || typeof next[bandId] !== 'object') return;
+      const band = { ...next[bandId] };
+      Object.keys(band).forEach(student => {
+        if (band[student] === oldName) band[student] = newName;
+      });
+      next[bandId] = band;
+    });
+    return next;
+  }
+
+  function renameWorkshopInStoredChoices(oldName, newName) {
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (!key?.startsWith('wv_choices_')) continue;
+      const data = load(key, null);
+      if (!data) continue;
+      const updated = normalizeBandDataObject(data);
+      let changed = false;
+      ALL_BAND_IDS.forEach(bandId => {
+        const band = updated[bandId];
+        if (!band) return;
+        Object.keys(band).forEach(student => {
+          const ch = band[student];
+          if (!Array.isArray(ch)) return;
+          const mapped = ch.map(c => (c === oldName ? newName : c));
+          if (mapped.some((c, idx) => c !== ch[idx])) {
+            band[student] = mapped;
+            changed = true;
+          }
+        });
+      });
+      if (changed) save(key, updated, false);
+    }
+  }
+
+  function requestRenameWorkshop(oldName, newNameRaw) {
+    const newName = String(newNameRaw || '').trim();
+    if (!newName || newName === oldName) return;
+    const taken = new Set([...Object.keys(workshops), ...Object.keys(archivedWorkshops)]);
+    if (taken.has(newName)) {
+      window.alert(`Der Name „${newName}“ ist bereits einer anderen Werkstatt zugeordnet. Bitte wählen Sie einen anderen Namen.`);
+      return;
+    }
+    if (!workshops[oldName] && !archivedWorkshops[oldName]) return;
+    setWorkshopRenameDialog({ oldName, newName });
+  }
+
+  function confirmRenameWorkshop() {
+    if (!workshopRenameDialog) return;
+    const { oldName, newName } = workshopRenameDialog;
+
+    setWorkshops(prev => renameKeyInRecord(prev, oldName, newName));
+    setArchivedWorkshops(prev => renameKeyInRecord(prev, oldName, newName));
+    setWorkshopColors(prev => renameKeyInRecord(prev, oldName, newName));
+    setWorkshopTeachers(prev => renameKeyInRecord(prev, oldName, newName));
+    setWorkshopRooms(prev => renameKeyInRecord(prev, oldName, newName));
+
+    setPrereqs(prev => {
+      const next = {};
+      Object.entries(prev).forEach(([k, list]) => {
+        const key = k === oldName ? newName : k;
+        next[key] = (list || []).map(w => (w === oldName ? newName : w));
+      });
+      return next;
+    });
+
+    setCannotBeParallel(prev => {
+      const next = {};
+      Object.entries(prev).forEach(([k, list]) => {
+        const key = k === oldName ? newName : k;
+        next[key] = (list || []).map(w => (w === oldName ? newName : w));
+      });
+      return next;
+    });
+
+    setAllowSelfParallel(prev => {
+      if (!prev[oldName]) return prev;
+      const next = { ...prev };
+      delete next[oldName];
+      next[newName] = true;
+      return next;
+    });
+
+    setRules(prev =>
+      prev.map(r => {
+        const next = { ...r };
+        if (Array.isArray(next.options)) {
+          next.options = next.options.map(o => (o === oldName ? newName : o));
+        }
+        if (next.fromCourse === oldName) next.fromCourse = newName;
+        if (next.toCourse === oldName) next.toCourse = newName;
+        return next;
+      })
+    );
+
+    setConfirmedAssignments(prev => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach(slotKey => {
+        const payload = updated[slotKey];
+        if (!payload?.assignments) return;
+        updated[slotKey] = {
+          ...payload,
+          assignments: replaceWorkshopInBandAssignments(payload.assignments, oldName, newName),
+        };
+      });
+      return updated;
+    });
+
+    setPrevAssignments(prev => {
+      const updated = { ...prev };
+      Object.keys(updated).forEach(student => {
+        const val = updated[student];
+        if (Array.isArray(val)) {
+          updated[student] = val.map(w => (w === oldName ? newName : w));
+        } else if (val === oldName) {
+          updated[student] = newName;
+        }
+      });
+      return updated;
+    });
+
+    setDragAssignments(prev => replaceWorkshopInBandAssignments(prev, oldName, newName));
+
+    setUploadedChoices(prev => {
+      const updated = normalizeBandDataObject(prev);
+      ALL_BAND_IDS.forEach(bandId => {
+        Object.keys(updated[bandId] || {}).forEach(student => {
+          const ch = updated[bandId][student];
+          if (Array.isArray(ch)) {
+            updated[bandId][student] = ch.map(c => (c === oldName ? newName : c));
+          }
+        });
+      });
+      return updated;
+    });
+
+    setTrimesterPlans(prev => {
+      const out = {};
+      Object.entries(prev).forEach(([key, plan]) => {
+        const courses = { ...(plan.courses || {}) };
+        if (Object.prototype.hasOwnProperty.call(courses, oldName)) {
+          courses[newName] = courses[oldName];
+          delete courses[oldName];
+        }
+        out[key] = { ...plan, courses };
+      });
+      return out;
+    });
+
+    renameWorkshopInStoredChoices(oldName, newName);
+
+    setActiveWorkshopEditor(prev => {
+      if (!prev || prev === 'new') return prev;
+      if (prev.name === oldName) return { ...prev, name: newName };
+      return prev;
+    });
+    if (editingWorkshop === oldName) setEditingWorkshop(newName);
+
+    setWorkshopRenameDialog(null);
+  }
+
   // Rules tab: manage rules - students must have taken ALL listed courses at some point
   // Rule types:
-  // - "belegung": { type: "belegung", name, options: ["Kunst I","Kunst II"] } - student must have taken ALL courses
-  // - "folgekurs": { type: "folgekurs", name, fromCourse, toCourse, sameBand: boolean } - if student takes fromCourse in trimester T, they must take toCourse in trimester T+1
+  // - "belegung": all listed courses at least once
+  // - "mindestbelegung": at least minCount distinct courses from options
+  // - "folgekurs": sequential course requirement
+  // - "freitext": manual checklist with free-text description
+  const [activeRuleEditor, setActiveRuleEditor] = useState(null);
+
   function addRule(rule) {
-    setRules(prev => [...prev, { ...rule, id: Date.now() }]);
+    const id = Date.now();
+    setRules(prev => [...prev, { ...rule, id }]);
+    return id;
+  }
+  function updateRule(id, updates) {
+    setRules(prev => prev.map(r => {
+      if (r.id !== id) return r;
+      const type = r.type || 'belegung';
+      return { ...r, ...updates, id, type };
+    }));
   }
   function deleteRule(id) {
     setRules(prev => prev.filter(r => r.id !== id));
+    setActiveRuleEditor(prev => (prev === id ? null : prev));
+  }
+
+  function duplicateRule(sourceId) {
+    const source = rules.find(r => r.id === sourceId);
+    if (!source) return null;
+    const baseName = source.name || 'Regel';
+    let copyName = `${baseName} (Kopie)`;
+    const taken = new Set(rules.map(r => r.name));
+    let suffix = 2;
+    while (taken.has(copyName)) {
+      copyName = `${baseName} (Kopie ${suffix})`;
+      suffix += 1;
+    }
+    const { id: _omit, ...rest } = source;
+    const newId = addRule({
+      ...rest,
+      name: copyName,
+      options: Array.isArray(rest.options) ? [...rest.options] : rest.options,
+      klassenStufenRange: rest.klassenStufenRange
+        ? { ...rest.klassenStufenRange }
+        : rest.klassenStufenRange,
+    });
+    setActiveRuleEditor(newId);
+    return newId;
   }
 
   // Student trimester management
-  function updateStudentTrimester(student, trimester) {
-    setStudentTrimesters(prev => ({ ...prev, [student]: trimester }));
+  // Update student class manually from Student Tab
+  function updateStudentClass(student, newClass) {
+    setStudentClasses(prev => {
+      const updated = { ...prev };
+      if (newClass !== undefined && newClass !== null && newClass !== '') {
+        updated[student] = newClass;
+      } else {
+        delete updated[student];
+      }
+      return updated;
+    });
+  }
+
+  function updateStudentEnrollmentYear(student, yearValue) {
+    setStudentEnrollmentYears(prev => {
+      const updated = { ...prev };
+      const year = parseOptionalRuleYear(yearValue);
+      if (year != null) {
+        updated[student] = year;
+      } else {
+        delete updated[student];
+      }
+      return updated;
+    });
+  }
+
+  function addClassToRegistry(className, assignToStudent = null) {
+    const trimmed = String(className || '').trim();
+    if (!trimmed) return false;
+    setClassRegistry(prev => [...new Set([...prev, trimmed])].sort());
+    const stufe = parseKlassenStufeFromClass(trimmed);
+    if (stufe != null) {
+      setKlassenStufenPool(prev => [...new Set([...prev, stufe])].sort((a, b) => a - b));
+    }
+    if (assignToStudent) {
+      updateStudentClass(assignToStudent, trimmed);
+    }
+    return true;
+  }
+
+  function addKlassenStufeToPool() {
+    setKlassenStufenPool(prev => {
+      const next = prev.length ? Math.max(...prev) + 1 : 5;
+      if (prev.includes(next)) return prev;
+      return [...prev, next].sort((a, b) => a - b);
+    });
+  }
+
+  function formatUploadTrimesterLabel(trimesterKey) {
+    const parsed = parseSchoolYearKey(trimesterKey);
+    if (!parsed) return trimesterKey;
+    return formatYearTrimester(parsed.schoolYearStart, parsed.schoolYearEnd, parsed.trimester);
+  }
+
+  function getStudentClassDescription(student) {
+    const current = studentClasses[student];
+    const uploadInfo = studentClassUploadInfo[student];
+    const uploads = Array.isArray(uploadInfo?.uploads) ? uploadInfo.uploads : [];
+    if (uploads.length) {
+      const latest = [...uploads].sort((a, b) => String(a.trimesterKey).localeCompare(String(b.trimesterKey))).pop();
+      const sameSlot = uploads.filter(entry => entry.trimesterKey === latest.trimesterKey && entry.className === latest.className);
+      const bandLabels = [...new Set(sameSlot.map(entry => getBandShortLabel(entry.bandId)).filter(Boolean))];
+      const trimesterLabel = formatUploadTrimesterLabel(latest.trimesterKey);
+      const bandText = bandLabels.length ? ` (${bandLabels.join(', ')})` : '';
+      let text = `Laut Wahl-Upload für ${trimesterLabel}${bandText} ist ${student} in Klasse ${latest.className}.`;
+      if (current && current !== latest.className) {
+        text += ` Aktuell manuell zugeordnet: Klasse ${current}.`;
+      }
+      return text;
+    }
+    if (uploadInfo?.className) {
+      const trimesterLabel = formatUploadTrimesterLabel(uploadInfo.trimesterKey);
+      let text = `Laut Wahl-Upload für ${trimesterLabel} ist ${student} in Klasse ${uploadInfo.className}.`;
+      if (current && current !== uploadInfo.className) {
+        text += ` Aktuell manuell zugeordnet: Klasse ${current}.`;
+      }
+      return text;
+    }
+    if (current) {
+      return `${student} ist in Klasse ${current}. (Keine Zuordnung aus einem Wahl-Upload gespeichert.)`;
+    }
+    return `${student} hat noch keine Klasse.`;
   }
 
   // Update student comment
@@ -3804,6 +5155,14 @@ export default function WerkstattVerwaltungApp() {
   // NEW: toggle personal assistant flag for a student
   function toggleStudentAssistant(student) {
     setStudentAssistants(prev => ({ ...prev, [student]: !prev[student] }));
+  }
+
+  function toggleManualRuleCheck(student, ruleId) {
+    setManualRuleChecks(prev => {
+      const studentChecks = { ...(prev[student] || {}) };
+      studentChecks[ruleId] = !studentChecks[ruleId];
+      return { ...prev, [student]: studentChecks };
+    });
   }
 
   // Calculate current workshop assignments for the active Band
@@ -3877,8 +5236,11 @@ export default function WerkstattVerwaltungApp() {
       issues.push(`Wahl verletzt Regel: ${last} war bereits letztes Jahr zugeordnet.`);
     }
     // if they picked same option twice
-    if (choices && choices.length === 2 && choices[0] === choices[1]) {
-      issues.push("Wahl enthält zweimal dieselbe Werkstatt.");
+    if (choices && choices.length > 1 && choices.every(c => c === choices[0])) {
+      issues.push("Wahl enthält mehrfach dieselbe Werkstatt.");
+    }
+    if (choices && choices.length > activeTrimesterWahlCount) {
+      issues.push(`Mehr als ${activeTrimesterWahlCount} Wahlen laut Trimester-Plan.`);
     }
     return issues;
   }
@@ -4004,40 +5366,83 @@ export default function WerkstattVerwaltungApp() {
   }
 
   // Check for students assigned to same workshop in both bands
-  function getStudentsWithSameWorkshopInBothBands() {
-    const conflicts = [];
-    students.forEach(student => {
-      const workshopsByBand = activeBandIds
-        .map(bandId => dragAssignments[bandId]?.[student])
-        .filter(w => w && !isNotAssigned(w));
-      const unique = new Set(workshopsByBand);
-      if (workshopsByBand.length > unique.size) {
-        const duplicate = workshopsByBand.find((w, i) => workshopsByBand.indexOf(w) !== i);
-        conflicts.push({ student, workshop: duplicate });
-      }
-    });
-    return conflicts;
-  }
-
-  // Check which students have no votes/choices for the active band
   function hasNoVotesForBand(student, band) {
     const choices = getChoicesForBand(band)[student];
-    return !choices || choices.length === 0;
+    return !Array.isArray(choices) || choices.length === 0;
   }
 
+  function studentExpectedOnBand(student, bandId) {
+    return isStudentExpectedToVoteOnBand(
+      student,
+      activeTrimesterPlan,
+      bandId,
+      studentEnrollmentYears,
+      studentClasses
+    );
+  }
 
-  // Check for students with same first choice in both bands
-  function getStudentsWithSameFirstChoiceInBothBands() {
-    const conflicts = [];
-    students.forEach(student => {
-      const firstChoices = activeBandIds
-        .map(bandId => getChoicesForBand(bandId)[student]?.[0])
-        .filter(Boolean);
-      if (firstChoices.length >= 2 && new Set(firstChoices).size < firstChoices.length) {
-        conflicts.push({ student, workshop: firstChoices[0] });
-      }
+  function isOpenAssignment(assignment) {
+    return !assignment || isNotAssigned(assignment);
+  }
+
+  function unassignedStudentsForBand(bandId) {
+    const extras = extraUnassignedByBand[bandId] || [];
+    return students.filter(student => {
+      const assignment = dragAssignments[bandId]?.[student];
+      if (!isOpenAssignment(assignment)) return false;
+      return studentExpectedOnBand(student, bandId) || extras.includes(student);
     });
-    return conflicts;
+  }
+
+  function addStudentToUnassigned(student) {
+    setExtraUnassignedByBand(prev => {
+      const list = prev[activeBand] || [];
+      if (list.includes(student)) return prev;
+      return { ...prev, [activeBand]: [...list, student] };
+    });
+    setAddUnassignedQuery('');
+  }
+
+  function workshopsConflict(left, right) {
+    if (!left || !right || isNotAssigned(left) || isNotAssigned(right)) return false;
+    const leftBlocked = cannotBeParallel[left] || [];
+    const rightBlocked = cannotBeParallel[right] || [];
+    return leftBlocked.includes(right) || rightBlocked.includes(left);
+  }
+
+  function bandWarningGroups() {
+    return activeBandIds.map(bandId => {
+      const choiceCount = Object.keys(getChoicesForBand(bandId)).length;
+      const missing = choiceCount > 0
+        ? students.filter(student => studentExpectedOnBand(student, bandId) && hasNoVotesForBand(student, bandId))
+        : [];
+      const selfParallel = [];
+      const ruleParallel = [];
+      const sameFirst = [];
+      students.forEach(student => {
+        const here = dragAssignments[bandId]?.[student];
+        const hereChoice = getChoicesForBand(bandId)[student]?.[0];
+        activeBandIds.forEach(otherBandId => {
+          if (otherBandId === bandId) return;
+          const there = dragAssignments[otherBandId]?.[student];
+          if (here && there && !isNotAssigned(here) && here === there && !courseAllowsSelfParallel(here, allowSelfParallel)) {
+            selfParallel.push({ student, workshop: here, otherBandId });
+          } else if (here && there && !isNotAssigned(here) && !isNotAssigned(there) && workshopsConflict(here, there)) {
+            ruleParallel.push({ student, workshop: here, otherWorkshop: there, otherBandId });
+          }
+          const otherChoice = getChoicesForBand(otherBandId)[student]?.[0];
+          if (
+            hereChoice &&
+            otherChoice &&
+            hereChoice === otherChoice &&
+            !courseAllowsSelfParallel(hereChoice, allowSelfParallel)
+          ) {
+            sameFirst.push({ student, workshop: hereChoice, otherBandId });
+          }
+        });
+      });
+      return { bandId, missing, selfParallel, ruleParallel, sameFirst };
+    });
   }
 
   // Toggle warning checkbox
@@ -4073,6 +5478,41 @@ export default function WerkstattVerwaltungApp() {
     return history;
   }
 
+  const bandSwitcher = (
+    <div className="flex flex-wrap gap-2">
+      {activeBandIds.map(bandId => {
+        const choiceCount = Object.keys(getChoicesForBand(bandId)).length;
+        const assignedCount = Object.values(dragAssignments[bandId] || {}).filter(a => !isNotAssigned(a)).length;
+        const subtitle = activeTrimesterPlan?.bandSubtitles?.[bandId]?.trim();
+        return (
+          <button
+            key={bandId}
+            type="button"
+            onClick={() => setActiveBand(bandId)}
+            className={`px-4 py-2.5 rounded-xl font-semibold transition-all text-sm text-left ${
+              activeBand === bandId
+                ? 'bg-blue-600 text-white shadow-md ring-2 ring-blue-300'
+                : 'bg-gray-100 text-gray-800 hover:bg-gray-200 border border-gray-200'
+            }`}
+          >
+            <span className="block">
+              {getBandShortLabel(bandId)}
+              {subtitle ? (
+                <span className={`font-normal ${activeBand === bandId ? 'text-blue-50' : 'text-gray-600'}`}>
+                  {' · '}{subtitle}
+                </span>
+              ) : null}
+            </span>
+            <span className={`block text-[11px] font-normal mt-0.5 ${activeBand === bandId ? 'text-blue-100' : 'text-gray-500'}`}>
+              {choiceCount > 0 ? `${choiceCount} Wahlen` : 'Kein Upload'}
+              {assignedCount > 0 ? ` · ${assignedCount} zugeordnet` : ''}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+
   // ----------------------------
   // UI
   // ----------------------------
@@ -4080,44 +5520,121 @@ export default function WerkstattVerwaltungApp() {
     <div className="app-container">
       {/* Unsaved Changes Warning */}
       <header className="app-header">
-        <h1 className="app-title">Werkstatt-Verwaltung</h1>
         <nav className="nav-buttons">
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
             tab==='students' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
           }`} onClick={()=>setTab('students')}>Schüler</button>
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
             tab==='wahl' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
           }`} onClick={() => {
             setTab('wahl');
             if (!hasVisitedWahlTab.current) {
               hasVisitedWahlTab.current = true;
-              setShowTrimesterDialog(true);
+              if (definedTrimesterList.length > 0) setShowTrimesterDialog(true);
             }
           }}>Wahl & Zuordnung</button>
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
+            tab==='trimester' 
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
+          }`} onClick={()=>setTab('trimester')}>Trimester</button>
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
             tab==='reports' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
           }`} onClick={()=>setTab('reports')}>Berichte</button>
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
             tab==='workshops' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
           }`} onClick={()=>setTab('workshops')}>Werkstätten</button>
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
+          <button className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors ${
             tab==='rules' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
+              ? 'bg-teal-700 text-white border-teal-800' 
+              : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
           }`} onClick={()=>setTab('rules')}>Belegungs-Regeln</button>
-          <button className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
-            tab==='data' 
-              ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg' 
-              : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-          }`} onClick={()=>setTab('data')}>Daten</button>
+
+          <div className="relative ml-auto" ref={dataMenuRef}>
+            <input
+              ref={importDataInputRef}
+              type="file"
+              accept=".zip"
+              onChange={(e) => {
+                handleImportData(e);
+                setDataMenuOpen(false);
+              }}
+              className="hidden"
+            />
+            <button
+              type="button"
+              onClick={() => setDataMenuOpen(open => !open)}
+              className={`px-4 py-2.5 rounded-lg text-sm font-semibold border-2 transition-colors flex items-center gap-2 ${
+                dataMenuOpen
+                  ? 'bg-teal-700 text-white border-teal-800'
+                  : 'bg-white text-slate-700 border-slate-400 hover:border-teal-700 hover:bg-teal-50'
+              }`}
+              aria-expanded={dataMenuOpen}
+              aria-haspopup="menu"
+            >
+              Daten
+              <svg className={`w-4 h-4 transition-transform ${dataMenuOpen ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </button>
+            {dataMenuOpen && (
+              <div
+                className="absolute right-0 top-full mt-2 w-80 bg-white rounded-xl shadow-xl border border-gray-200 py-2 z-[100] text-left"
+                role="menu"
+              >
+                <div className="px-4 py-2 text-xs font-semibold text-gray-500 uppercase tracking-wide border-b border-gray-100 mb-1">
+                  Backup &amp; Wiederherstellung
+                </div>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="w-full px-4 py-2.5 text-sm text-gray-800 hover:bg-green-50 flex items-center gap-2"
+                  onClick={() => {
+                    handleExportAllData();
+                    setDataMenuOpen(false);
+                  }}
+                >
+                  <span className="text-green-600">↓</span>
+                  Alle Daten als ZIP exportieren
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="w-full px-4 py-2.5 text-sm text-gray-800 hover:bg-blue-50 flex items-center gap-2"
+                  onClick={() => importDataInputRef.current?.click()}
+                >
+                  <span className="text-blue-600">↑</span>
+                  ZIP-Backup importieren
+                </button>
+                <div className="my-2 border-t border-gray-100" />
+                <div className="px-4 py-2 text-xs text-gray-600 leading-relaxed">
+                  <span className="font-medium text-gray-800">{students.length}</span> Schüler ·{' '}
+                  <span className="font-medium text-gray-800">{Object.keys(workshops).length}</span> Werkstätten ·{' '}
+                  <span className="font-medium text-gray-800">{Object.keys(confirmedAssignments).length}</span> Trimester gespeichert
+                </div>
+                <div className="my-2 border-t border-gray-100" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="w-full px-4 py-2.5 text-sm text-red-700 hover:bg-red-50 flex items-center gap-2"
+                  onClick={() => {
+                    setDataMenuOpen(false);
+                    handleClearAllData();
+                  }}
+                >
+                  Alle Daten löschen…
+                </button>
+              </div>
+            )}
+          </div>
         </nav>
       </header>
 
@@ -4134,57 +5651,62 @@ export default function WerkstattVerwaltungApp() {
             <DialogTitle>Trimester auswählen</DialogTitle>
           </DialogHeader>
           <div className="space-y-4 py-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Schuljahr:</label>
-              <div className="flex items-center gap-2">
-                <input 
-                  type="number" 
-                  value={dialogYearTrimester.schoolYearStart} 
-                  onChange={(e) => {
-                    const start = parseInt(e.target.value) || getDefaultSchoolYear().schoolYearStart;
-                    setDialogYearTrimester({ schoolYearStart: start, schoolYearEnd: start + 1, trimester: dialogYearTrimester.trimester });
-                  }}
-                  className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-                  min="2020"
-                  max="2100"
-                />
-                <span className="text-gray-500">/</span>
-                <div className="flex-1 px-3 py-2 bg-gray-50 border border-gray-300 rounded-lg text-gray-600">
-                  {dialogYearTrimester.schoolYearEnd}
-                </div>
+            {definedTrimesterList.length === 0 ? (
+              <div className="text-sm text-amber-800 bg-amber-50 border border-amber-200 rounded-lg p-4">
+                Es sind noch keine Trimester definiert. Legen Sie zuerst unter <strong>Trimester</strong> ein Trimester an.
+                <button
+                  type="button"
+                  className="block mt-3 text-teal-700 font-semibold underline"
+                  onClick={() => { setShowTrimesterDialog(false); setTab('trimester'); }}
+                >
+                  Zum Trimester-Management
+                </button>
               </div>
-            </div>
-            
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Trimester:</label>
-              <select 
-                value={dialogYearTrimester.trimester} 
-                onChange={(e) => setDialogYearTrimester(prev => ({ ...prev, trimester: parseInt(e.target.value) }))}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
-              >
-                <option value={1}>1. Trimester</option>
-                <option value={2}>2. Trimester</option>
-                <option value={3}>3. Trimester</option>
-              </select>
-            </div>
-            
-            <div className="flex justify-end gap-2 pt-2">
-              <button
-                onClick={() => setShowTrimesterDialog(false)}
-                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
-              >
-                Abbrechen
-              </button>
-              <button
-                onClick={() => {
-                  setYearTrimester(dialogYearTrimester);
-                  setShowTrimesterDialog(false);
-                }}
-                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
-              >
-                Bestätigen
-              </button>
-            </div>
+            ) : (
+              <>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Definiertes Trimester:</label>
+                  <select
+                    value={getSchoolYearKey(dialogYearTrimester.schoolYearStart, dialogYearTrimester.schoolYearEnd, dialogYearTrimester.trimester)}
+                    onChange={(e) => {
+                      const plan = trimesterPlans[e.target.value];
+                      if (!plan) return;
+                      setDialogYearTrimester({
+                        schoolYearStart: plan.schoolYearStart,
+                        schoolYearEnd: plan.schoolYearEnd,
+                        trimester: plan.trimester,
+                      });
+                    }}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-indigo-500"
+                  >
+                    {definedTrimesterList.map(plan => (
+                      <option key={plan.key} value={plan.key}>
+                        {formatYearTrimester(plan.schoolYearStart, plan.schoolYearEnd, plan.trimester)}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex justify-end gap-2 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTrimesterDialog(false)}
+                    className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
+                  >
+                    Abbrechen
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setYearTrimester(dialogYearTrimester);
+                      setShowTrimesterDialog(false);
+                    }}
+                    className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
+                  >
+                    Bestätigen
+                  </button>
+                </div>
+              </>
+            )}
           </div>
         </DialogContent>
       </Dialog>
@@ -4346,12 +5868,12 @@ export default function WerkstattVerwaltungApp() {
                       filteredStudents.map(s => (
                       <div 
                         key={s} 
-                          className={`p-3 rounded-lg mb-2 transition-all duration-200 ${
+                          className={`p-3 rounded-lg mb-2 border-2 transition-colors ${
                           selectedStudent===s
-                            ? 'bg-gradient-to-r from-blue-500 to-blue-600 text-white shadow-lg transform scale-105'
+                            ? 'bg-teal-100 text-slate-900 border-teal-800'
                               : selectedStudents.has(s)
-                              ? 'bg-gradient-to-r from-yellow-100 to-yellow-200 border-2 border-yellow-400 shadow-md'
-                            : 'bg-gradient-to-r from-white to-gray-50 hover:from-gray-100 hover:to-gray-200 shadow-sm hover:shadow-md border border-gray-200'
+                              ? 'bg-amber-50 text-slate-900 border-amber-600'
+                            : 'bg-white text-slate-800 border-slate-300 hover:border-teal-700 hover:bg-teal-50'
                         }`}
                       >
                         <div className="flex items-center justify-between">
@@ -4370,13 +5892,19 @@ export default function WerkstattVerwaltungApp() {
                                 className="flex-1 cursor-pointer"
                                 onClick={()=>setSelectedStudent(s)}
                               >
-                          <div className="font-medium">{s}</div>
-                                {studentClasses[s] && (
-                                  <div className={`text-xs ${selectedStudent===s ? 'text-blue-100' : 'text-gray-500'}`}>
-                                    Klasse: {studentClasses[s]}
-                        </div>
-                                )}
-                      </div>
+                                <div className="font-medium flex items-center justify-between">
+                                  <span className="text-slate-900">{s}</span>
+                                  {studentClasses[s] ? (
+                                    <span className={`text-[11px] px-1.5 py-0.5 rounded font-semibold ${selectedStudent===s ? 'bg-teal-800 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                      {studentClasses[s]}
+                                    </span>
+                                  ) : (
+                                    <span className={`text-[10px] italic ${selectedStudent===s ? 'text-teal-800' : 'text-slate-400'}`}>
+                                      ohne Klasse
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             </div>
                             <button
                               onClick={(e) => {
@@ -4402,177 +5930,294 @@ export default function WerkstattVerwaltungApp() {
                       <div className="text-gray-500 text-lg">Wähle einen Schüler aus, um Details zu sehen.</div>
                     </div>
                   ) : (
-                    <div className="bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200">
-                      <div className="flex items-center justify-between mb-6 border-b border-green-300 pb-3">
-                        <h2 className="text-2xl font-bold text-green-900">{selectedStudent}</h2>
-                        {studentClasses[selectedStudent] && (
-                          <span className="px-3 py-1 bg-green-200 text-green-800 rounded-lg text-sm font-semibold">
-                            Klasse: {studentClasses[selectedStudent]}
-                          </span>
+                    <div className="bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200 space-y-5">
+                      {(() => {
+                        const priorityScore = calculatePriorityScoreFromHistory(selectedStudent);
+                        const priorityLabel = priorityScore >= 8 ? 'Hoch' : priorityScore >= 5 ? 'Mittel' : 'Niedrig';
+                        return (
+                          <div className="border-b border-green-300 pb-4">
+                            <h2 className="text-2xl font-bold text-green-900 mb-2">{selectedStudent}</h2>
+                            <div className="flex flex-wrap items-center gap-2 text-sm">
+                              {studentAssistants[selectedStudent] && (
+                                <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 font-medium border border-blue-200">
+                                  Lernbegleitung
+                                </span>
+                              )}
+                              <span
+                                className="px-2.5 py-0.5 rounded-full bg-gray-100 text-gray-800 font-medium border border-gray-200"
+                                title="Automatisch aus Zuweisungs-Historie berechnet"
+                              >
+                                Priorität {priorityScore.toFixed(1)}/10 · {priorityLabel}
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })()}
+
+                    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200 space-y-4">
+                      <div>
+                        <h3 className="text-base font-semibold text-gray-800 mb-3">Klasse</h3>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {classRegistry.length === 0 && !showAddClassForm && (
+                            <span className="text-sm text-gray-500">Noch keine Klassen angelegt.</span>
+                          )}
+                          {classRegistry.map(cls => {
+                            const isActive = studentClasses[selectedStudent] === cls;
+                            return (
+                              <button
+                                key={cls}
+                                type="button"
+                                onClick={() => updateStudentClass(selectedStudent, cls)}
+                                className={`px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${
+                                  isActive
+                                    ? 'bg-green-600 text-white border-green-700 shadow-sm'
+                                    : 'bg-white text-gray-800 border-gray-300 hover:bg-gray-50 hover:border-gray-400'
+                                }`}
+                              >
+                                {cls}
+                              </button>
+                            );
+                          })}
+                          {!showAddClassForm ? (
+                            <button
+                              type="button"
+                              onClick={() => setShowAddClassForm(true)}
+                              className="px-3 py-1.5 rounded-lg text-sm font-semibold border border-dashed border-green-600 text-green-700 hover:bg-green-50"
+                            >
+                              + Neue Klasse anlegen
+                            </button>
+                          ) : (
+                            <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
+                              <input
+                                type="text"
+                                placeholder="z. B. 5a"
+                                value={newRegistryClassName}
+                                onChange={e => setNewRegistryClassName(e.target.value)}
+                                onKeyDown={e => {
+                                  if (e.key === 'Enter' && addClassToRegistry(newRegistryClassName, selectedStudent)) {
+                                    setNewRegistryClassName('');
+                                    setShowAddClassForm(false);
+                                  }
+                                  if (e.key === 'Escape') {
+                                    setShowAddClassForm(false);
+                                    setNewRegistryClassName('');
+                                  }
+                                }}
+                                className="px-2 py-1.5 border border-gray-300 rounded-lg text-sm min-w-[8rem]"
+                                autoFocus
+                              />
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  if (addClassToRegistry(newRegistryClassName, selectedStudent)) {
+                                    setNewRegistryClassName('');
+                                    setShowAddClassForm(false);
+                                  }
+                                }}
+                                className="px-3 py-1.5 bg-green-600 text-white text-sm font-semibold rounded-lg"
+                              >
+                                Anlegen & zuweisen
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => { setShowAddClassForm(false); setNewRegistryClassName(''); }}
+                                className="px-2 py-1.5 text-sm text-gray-600 hover:bg-gray-100 rounded-lg"
+                              >
+                                Abbrechen
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                        <p className="text-sm text-gray-700 mt-3 leading-relaxed">
+                          {getStudentClassDescription(selectedStudent)}
+                        </p>
+                      </div>
+                      <div className="pt-3 border-t border-gray-100">
+                        <div className="flex flex-wrap items-center gap-2 mb-1">
+                          <label className="text-sm font-medium text-gray-800">Einschulungsjahr</label>
+                          <button
+                            type="button"
+                            onClick={() => setShowEinschulungsjahrInfo(v => !v)}
+                            className="text-xs font-semibold px-2 py-0.5 rounded-md border border-blue-200 bg-blue-50 text-blue-800 hover:bg-blue-100"
+                            aria-expanded={showEinschulungsjahrInfo}
+                          >
+                            Info
+                          </button>
+                        </div>
+                        {showEinschulungsjahrInfo && (
+                          <div className="text-xs text-blue-950 bg-blue-50 border border-blue-200 rounded-lg p-3 mb-2 leading-relaxed space-y-2">
+                            <p>
+                              Das Einschulungsjahr wird <strong>beim allerersten Auftauchen in einem Wahl-Upload</strong> gesetzt
+                              (sobald der Schüler Wahlen und eine Klasse in der Datei hat).
+                            </p>
+                            <p>
+                              Daraus wird der Einschulungsjahrgang berechnet:{' '}
+                              <strong>Schuljahresstart minus (Klassenstufe − 5)</strong>.
+                              Beispiel: Klasse 7a im Schuljahr 2025/26 → Einschulungsjahr 2023.
+                            </p>
+                            <p>
+                              <strong>Sitzenbleiben:</strong> Bleibt ein Schüler in derselben Klassenstufe hängen, wird{' '}
+                              <strong>kein neues</strong> Einschulungsjahr vergeben — der Jahrgang bleibt für Regeln unverändert.
+                              Spätere Uploads ändern einen bereits gesetzten Wert nicht (nur manuell hier).
+                            </p>
+                          </div>
                         )}
+                        <p className="text-xs text-gray-500 mb-2">
+                          Für Belegungs-Regeln nach Einschulungsjahrgang. Wird sonst automatisch beim ersten Wahl-Upload gesetzt.
+                        </p>
+                        <select
+                          value={studentEnrollmentYears[selectedStudent] ?? ''}
+                          onChange={e => updateStudentEnrollmentYear(selectedStudent, e.target.value)}
+                          className="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
+                        >
+                          <option value="">— nicht gesetzt —</option>
+                          {getEinschulungsjahrYearOptions().map(y => (
+                            <option key={y} value={y}>{y}</option>
+                          ))}
+                        </select>
                       </div>
-
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Lernbegleitung nötig</h3>
-                      <div className="detail-content">
-                        <label className="inline-flex items-center p-3 bg-gradient-to-r from-gray-50 to-gray-100 rounded-lg hover:from-gray-100 hover:to-gray-200 transition-all duration-200 cursor-pointer">
-                          <input 
-                            type="checkbox" 
-                            checked={!!studentAssistants[selectedStudent]} 
-                            onChange={() => toggleStudentAssistant(selectedStudent)}
-                            className="w-4 h-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500"
-                          />
-                          <span className="ml-3 font-medium">Ja, benötigt Lernbegleitung</span>
-                        </label>
-                      </div>
+                      <label className="inline-flex items-center gap-2 cursor-pointer text-sm text-gray-800 pt-2 border-t border-gray-100">
+                        <input
+                          type="checkbox"
+                          checked={!!studentAssistants[selectedStudent]}
+                          onChange={() => toggleStudentAssistant(selectedStudent)}
+                          className="w-4 h-4 text-blue-600 rounded border-gray-300"
+                        />
+                        Benötigt Lernbegleitung (höchste Zuordnungs-Priorität)
+                      </label>
                     </div>
 
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <div className="flex items-center justify-between mb-3 border-b border-gray-300 pb-2">
-                        <h3 className="text-lg font-semibold text-gray-800">Prioritätspunktzahl</h3>
-                        <div className="group relative inline-block">
-                          <svg className="w-5 h-5 text-blue-500 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                          </svg>
-                          <div className="absolute left-1/2 bottom-full mb-2 transform -translate-x-1/2 w-80 bg-gray-900 text-white text-xs rounded-lg py-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50">
-                            Prioritätspunktzahl (1-10): Bestimmt die Reihenfolge bei der Zuweisung. HÖHERE Punktzahlen = höhere Priorität (werden zuerst zugewiesen). Die Punktzahl wird automatisch basierend auf der Historie berechnet: Pro Band - Erste Wahl erhalten: -1 Punkt, Zweite Wahl erhalten: -1 Punkt, Keine Wahl erhalten: +1 Punkt, Auch zweite Wahl nicht erhalten: +1.5 Punkte. Beide Bänder werden gemittelt. Schüler mit Lernbegleitung haben immer höchste Priorität (10).
-                          </div>
-                        </div>
-                      </div>
-                      <div className="detail-content">
-                        <div className="flex items-center space-x-3">
-                          <div className="w-24 px-3 py-2 border border-gray-300 rounded-lg bg-gray-50 text-lg font-semibold text-gray-700">
-                            {(() => {
-                              // Calculate dynamically based on history
-                              const calculatedScore = calculatePriorityScoreFromHistory(selectedStudent);
-                              return calculatedScore.toFixed(1);
-                            })()}
-                          </div>
-                          <span className="text-sm text-gray-600">/ 10</span>
-                          <span className="text-xs text-gray-500 italic">
-                            {(() => {
-                              const score = calculatePriorityScoreFromHistory(selectedStudent);
-                              return score >= 8 ? 'Hoch' : score >= 5 ? 'Mittel' : 'Niedrig';
-                            })()}
-                          </span>
-                          {(() => {
-                            const scoreHistory = calculatePriorityScoreHistory(selectedStudent);
-                            if (scoreHistory.length >= 2) {
-                              const width = 60;
-                              const height = 20;
-                              const padding = 2;
-                              const graphWidth = width - padding * 2;
-                              const graphHeight = height - padding * 2;
-                              
-                              // Find min and max scores for scaling
-                              const scores = scoreHistory.map(h => h.score);
-                              const minScore = Math.min(...scores);
-                              const maxScore = Math.max(...scores);
-                              const scoreRange = maxScore - minScore || 1; // Avoid division by zero
-                              
-                              // Generate path points
-                              const points = scoreHistory.map((point, index) => {
-                                const x = padding + (index / (scoreHistory.length - 1)) * graphWidth;
-                                const y = padding + graphHeight - ((point.score - minScore) / scoreRange) * graphHeight;
-                                return `${x},${y}`;
-                              });
-                              
-                              const pathData = `M ${points.join(' L ')}`;
-                              
-                              return (
-                                <svg width={width} height={height} className="flex-shrink-0" style={{ minWidth: width }}>
-                                  <path
-                                    d={pathData}
-                                    fill="none"
-                                    stroke="#3b82f6"
-                                    strokeWidth="1.5"
-                                    strokeLinecap="round"
-                                    strokeLinejoin="round"
-                                  />
-                                </svg>
-                              );
-                            }
-                            return null;
-                          })()}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Trimester (aktuell)</h3>
-                      <select 
-                        value={studentTrimesters[selectedStudent] || ''} 
-                        onChange={(e) => updateStudentTrimester(selectedStudent, e.target.value)}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                      >
-                        <option value="">Bitte wählen...</option>
-                        <option value="1">1. Trimester</option>
-                        <option value="2">2. Trimester</option>
-                        <option value="3">3. Trimester</option>
-                      </select>
-                    </div>
-
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Notizen / Kommentare</h3>
+                    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                      <label className="text-base font-semibold text-gray-800 block mb-2">Notizen</label>
                       <textarea
                         value={studentComments[selectedStudent] || ''}
                         onChange={(e) => updateStudentComment(selectedStudent, e.target.value)}
-                        placeholder="Notizen zu diesem Schüler..."
-                        rows={4}
-                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 resize-y"
+                        placeholder="Interne Notizen zu diesem Schüler…"
+                        rows={3}
+                        className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-green-500 text-sm resize-y"
                       />
-                      <div className="text-xs text-gray-500 mt-1">
-                        {studentComments[selectedStudent]?.length || 0} Zeichen
-                      </div>
                     </div>
 
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Pflichtkurse (fehlend — anhand Regeln geprüft)</h3>
+                    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                      <h3 className="text-base font-semibold text-gray-800 mb-3">Pflichtkurse & Regeln</h3>
                       <div className="detail-content">
                         {rules.length===0 ? (
                           <div className="text-gray-500 italic p-3 bg-gray-50 rounded-lg">Keine Regeln definiert.</div>
                         ) : (
                           <ul className="space-y-2">
                             {rules.map(r => {
+                              const studentHistory = buildHistoryForStudent(selectedStudent);
+                              const historyFlat = flattenWorkshopsFromStudentHistory(studentHistory);
                               const ruleType = r.type || 'belegung';
+                              const cohortStatus = getStudentCohortRuleStatus(r, selectedStudent, studentEnrollmentYears);
+                              if (cohortStatus === 'outside') {
+                                return (
+                                  <li key={r.id} className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-gray-600">
+                                    <span className="text-xs font-medium text-slate-500 block mb-0.5">Nicht betroffen</span>
+                                    <span className="font-medium text-gray-700">{r.name}</span>
+                                    <p className="text-xs mt-1">{formatRuleScopeLabel(r)} · Einschulungsjahr passt nicht</p>
+                                  </li>
+                                );
+                              }
+                              if (cohortStatus === 'missing') {
+                                return (
+                                  <li key={r.id} className="p-3 rounded-lg bg-slate-50 border border-amber-200 text-gray-600">
+                                    <span className="text-xs font-medium text-amber-700 block mb-0.5">Einschulungsjahr fehlt</span>
+                                    <span className="font-medium text-gray-700">{r.name}</span>
+                                    <p className="text-xs mt-1">{formatRuleScopeLabel(r)} · Bitte Einschulungsjahr setzen</p>
+                                  </li>
+                                );
+                              }
+                              const phase = getRuleZeitraumPhase(r, selectedStudent, studentClasses);
+
+                              if (phase === 'upcoming' || phase === 'unknown') {
+                                const range = getRuleKlassenStufenRange(r);
+                                const stufe = getStudentKlassenStufe(selectedStudent, studentClasses);
+                                return (
+                                  <li key={r.id} className="p-3 rounded-lg bg-slate-50 border border-slate-200 text-gray-600">
+                                    <span className="text-xs font-medium text-slate-500 block mb-0.5">
+                                      {phase === 'upcoming' ? 'Noch nicht fällig' : 'Klasse unbekannt'}
+                                    </span>
+                                    <span className="font-medium text-gray-700">{r.name}</span>
+                                    <p className="text-xs mt-1">
+                                      {formatRuleScopeLabel(r)}
+                                      {phase === 'upcoming' && range ? ` · Schüler: Stufe ${stufe} (ab Stufe ${range.from})` : ''}
+                                      {phase === 'unknown' ? ' · Klasse zuordnen für Stufen-Prüfung' : ''}
+                                    </p>
+                                  </li>
+                                );
+                              }
+
+                              const pastZeitraum = phase === 'after';
                               
                               if (ruleType === 'belegung') {
-                                // determine if the student's history contains ALL of the options (not just one)
-                                const history = buildHistoryForStudent(selectedStudent).map(h => {
-                                  // Extract both bands if available
-                                  if (h.erstesBand && h.zweitesBand) {
-                                    return [h.erstesBand, h.zweitesBand];
-                                  }
-                                  return [h.assigned];
-                                }).flat();
-                                
-                                // Check if student has ALL required courses
-                                const hasAll = (r.options || []).every(opt => history.includes(opt));
+                                const missing = (r.options || []).filter(opt => !historyFlat.includes(opt));
+                                const hasAll = missing.length === 0;
                                 return (
                                   <li key={r.id} className={`p-3 rounded-lg ${hasAll ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
-                                    <div className="flex items-center justify-between">
+                                    <div className="flex items-start justify-between gap-2">
                                       <div>
-                                        <span className="font-medium">{r.name}</span> — 
-                                        <span className={`ml-2 font-semibold ${hasAll ? 'text-green-700' : 'text-red-700'}`}>
-                                          {hasAll ? 'Erfüllt' : 'Nicht erfüllt'}
-                                        </span>
-                                      </div>
-                                      <div className="group relative inline-block ml-2">
-                                        <svg className="w-4 h-4 text-blue-500 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                                        </svg>
-                                        <div className="absolute right-0 bottom-full mb-2 transform w-64 bg-gray-900 text-white text-xs rounded-lg py-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50">
-                                          <strong>Regel:</strong> Der Schüler muss <strong>alle</strong> Kurse ({(r.options || []).join(', ')}) mindestens einmal belegt haben. {hasAll ? '✓ Alle Kurse wurden bereits belegt.' : '✗ Noch nicht alle Kurse belegt.'}
+                                        <span className="text-xs text-purple-700 font-medium">Alle Kurse</span>
+                                        <div>
+                                          <span className="font-medium">{r.name}</span>
+                                          <span className={`ml-2 font-semibold ${hasAll ? 'text-green-700' : 'text-red-700'}`}>
+                                            {hasAll ? 'Erfüllt' : pastZeitraum ? 'Nicht erfüllt (Zeitraum vorbei)' : 'Nicht erfüllt'}
+                                          </span>
                                         </div>
+                                        <p className="text-xs text-gray-600 mt-1">Alle: {(r.options || []).join(', ')} · {formatRuleZeitraumLabel(r)}</p>
+                                        {!hasAll && missing.length > 0 && (
+                                          <p className="text-xs text-red-700 mt-1">Offen: {missing.join(', ')}</p>
+                                        )}
                                       </div>
                                     </div>
                                   </li>
                                 );
-                              } else if (ruleType === 'folgekurs') {
-                                // For Folgekurs rules, check if the rule is satisfied based on previous and current trimester assignments
-                                const history = buildHistoryForStudent(selectedStudent);
-                                // Sort history by slotKey to get chronological order
-                                const sortedHistory = [...history].sort((a, b) => {
+                              }
+                              if (ruleType === 'mindestbelegung') {
+                                const minRequired = r.minCount || 1;
+                                const distinctCount = countDistinctWorkshopsFromOptions(historyFlat, r.options);
+                                const isMet = distinctCount >= minRequired;
+                                return (
+                                  <li key={r.id} className={`p-3 rounded-lg ${isMet ? 'bg-green-50 border border-green-200' : 'bg-red-50 border border-red-200'}`}>
+                                    <div>
+                                      <span className="text-xs text-indigo-700 font-medium">Mindestanzahl</span>
+                                      <div>
+                                        <span className="font-medium">{r.name}</span>
+                                        <span className={`ml-2 font-semibold ${isMet ? 'text-green-700' : 'text-red-700'}`}>
+                                          {distinctCount}/{minRequired} Kurse · {isMet ? 'Erfüllt' : 'Offen'}
+                                        </span>
+                                      </div>
+                                      <p className="text-xs text-gray-600 mt-1">
+                                        Zählt aus: {(r.options || []).join(', ')}
+                                      </p>
+                                    </div>
+                                  </li>
+                                );
+                              }
+                              if (ruleType === 'freitext') {
+                                const checked = !!manualRuleChecks[selectedStudent]?.[r.id];
+                                return (
+                                  <li key={r.id} className={`p-3 rounded-lg border ${checked ? 'bg-green-50 border-green-200' : 'bg-amber-50 border-amber-200'}`}>
+                                    <label className="flex items-start gap-3 cursor-pointer">
+                                      <input
+                                        type="checkbox"
+                                        checked={checked}
+                                        onChange={() => toggleManualRuleCheck(selectedStudent, r.id)}
+                                        className="mt-1 w-4 h-4 text-green-600 rounded border-gray-300"
+                                      />
+                                      <div className="flex-1 min-w-0">
+                                        <span className="text-xs text-amber-800 font-medium block">Manuelle Prüfung</span>
+                                        <span className="font-medium text-gray-900">{r.name}</span>
+                                        {r.description && (
+                                          <p className="text-sm text-gray-700 mt-1 whitespace-pre-wrap">{r.description}</p>
+                                        )}
+                                      </div>
+                                    </label>
+                                  </li>
+                                );
+                              }
+                              if (ruleType === 'folgekurs') {
+                                const sortedHistory = [...studentHistory].sort((a, b) => {
                                   // Parse school year and trimester from slotKey (format: "YYYY-YYYY T#" or legacy "YYYY-T#")
                                   const aParsed = parseSchoolYearKey(a.slotKey);
                                   const bParsed = parseSchoolYearKey(b.slotKey);
@@ -4593,13 +6238,10 @@ export default function WerkstattVerwaltungApp() {
                                   const next = sortedHistory[i + 1];
                                   
                                   // Check if fromCourse is in current trimester
-                                  const hasFromCourse = (current.erstesBand === r.fromCourse || current.zweitesBand === r.fromCourse) ||
-                                                       (!current.erstesBand && !current.zweitesBand && current.assigned === r.fromCourse);
+                                  const hasFromCourse = workshopsFromHistoryEntry(current).includes(r.fromCourse);
                                   
                                   if (hasFromCourse) {
-                                    // Check if toCourse is in next trimester
-                                    const hasToCourse = (next.erstesBand === r.toCourse || next.zweitesBand === r.toCourse) ||
-                                                       (!next.erstesBand && !next.zweitesBand && next.assigned === r.toCourse);
+                                    const hasToCourse = workshopsFromHistoryEntry(next).includes(r.toCourse);
                                     
                                     if (!hasToCourse) {
                                       isSatisfied = false;
@@ -4607,12 +6249,10 @@ export default function WerkstattVerwaltungApp() {
                                       break;
                                     }
                                     
-                                    // If sameBand is required, check that toCourse is in the same band
-                                    if (r.sameBand && current.erstesBand && current.zweitesBand && next.erstesBand && next.zweitesBand) {
-                                      const fromBand = current.erstesBand === r.fromCourse ? 'erstesBand' : 'zweitesBand';
-                                      const toBand = next.erstesBand === r.toCourse ? 'erstesBand' : 'zweitesBand';
-                                      
-                                      if (fromBand !== toBand) {
+                                    if (r.sameBand) {
+                                      const fromBand = bandIdForCourse(current, r.fromCourse);
+                                      const toBand = bandIdForCourse(next, r.toCourse);
+                                      if (fromBand && toBand && fromBand !== toBand) {
                                         isSatisfied = false;
                                         violationMessage = `Nach ${r.fromCourse} muss ${r.toCourse} im gleichen Band belegt werden.`;
                                         break;
@@ -4652,53 +6292,50 @@ export default function WerkstattVerwaltungApp() {
                       </div>
                     </div>
 
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Regelverstöße (Wahlen)</h3>
-                      <div className="detail-content space-y-4">
-                        {ALL_BAND_IDS.map(bandId => (
-                          <div key={bandId}>
-                            <h4 className="font-semibold text-sm mb-2 text-blue-700">{getBandLabel(bandId)}:</h4>
-                            {getChoicesForBand(bandId)[selectedStudent] ? (
-                              <ul className="space-y-1">
-                                {checkViolationsForStudent(selectedStudent, getChoicesForBand(bandId)[selectedStudent]).map((i, idx) => (
-                                  <li key={idx} className="p-2 bg-red-50 border border-red-200 rounded text-sm text-red-700">{i}</li>
-                                ))}
-                                {checkViolationsForStudent(selectedStudent, getChoicesForBand(bandId)[selectedStudent]).length === 0 && (
-                                  <li className="p-2 bg-green-50 border border-green-200 rounded text-sm text-green-700">Keine Auffälligkeiten</li>
-                                )}
-                              </ul>
-                            ) : <div className="text-gray-500 italic p-2 bg-gray-50 rounded">Keine Wahl-Daten geladen.</div>}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Vergangene Wahlen</h3>
-                      <div className="detail-content">
-                        <div className="space-y-4">
-                          {ALL_BAND_IDS.map(bandId => (
-                            <div key={bandId}>
-                              <h4 className="font-semibold text-sm mb-2 text-blue-700">{getBandLabel(bandId)}:</h4>
-                              {getChoicesForBand(bandId)[selectedStudent] ? (
-                                <div className="space-y-1">
-                                  {getChoicesForBand(bandId)[selectedStudent].map((choice, idx) => (
-                                    <div key={idx} className="p-2 bg-blue-50 border border-blue-200 rounded text-sm">
-                                      <span className="font-medium">{idx + 1}. Wahl:</span> {choice}
-                                    </div>
-                                  ))}
-                                </div>
+                    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                      <h3 className="text-base font-semibold text-gray-800 mb-3">Wahlabgabe (geladenes Trimester)</h3>
+                      <div className="space-y-3">
+                        {activeBandIds.map(bandId => {
+                          const choices = getChoicesForBand(bandId)[selectedStudent];
+                          const violations = choices
+                            ? checkViolationsForStudent(selectedStudent, choices)
+                            : [];
+                          return (
+                            <div key={bandId} className="rounded-lg border border-gray-200 p-3 bg-gray-50/80">
+                              <div className="text-sm font-semibold text-gray-800 mb-2">{getBandLabel(bandId)}</div>
+                              {!choices ? (
+                                <p className="text-sm text-gray-500 italic">Keine Wahldaten für dieses Band.</p>
                               ) : (
-                                <div className="text-gray-500 italic p-2 bg-gray-50 rounded text-sm">Keine Wahlen geladen.</div>
+                                <>
+                                  <div className="flex flex-wrap gap-2 mb-2">
+                                    {choices.map((choice, idx) => (
+                                      <span
+                                        key={idx}
+                                        className="text-xs px-2 py-1 rounded-md bg-white border border-gray-200"
+                                      >
+                                        {idx + 1}. {choice}
+                                      </span>
+                                    ))}
+                                  </div>
+                                  {violations.length > 0 ? (
+                                    <ul className="space-y-1">
+                                      {violations.map((msg, idx) => (
+                                        <li key={idx} className="text-xs p-2 bg-red-50 border border-red-200 rounded text-red-700">{msg}</li>
+                                      ))}
+                                    </ul>
+                                  ) : (
+                                    <p className="text-xs text-green-700">Keine Auffälligkeiten bei den Wahlen.</p>
+                                  )}
+                                </>
                               )}
                             </div>
-                          ))}
-                        </div>
+                          );
+                        })}
                       </div>
                     </div>
 
-                    <div className="bg-white rounded-lg p-4 mb-4 shadow-sm border border-gray-200">
-                      <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Werkstatt-Historie (zugeordnete Kurse nach Jahr/Trimester)</h3>
+                    <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
+                      <h3 className="text-base font-semibold text-gray-800 mb-3">Werkstatt-Historie</h3>
                       <div className="detail-content">
                         <StudentHistoryTable 
                           student={selectedStudent}
@@ -4717,89 +6354,174 @@ export default function WerkstattVerwaltungApp() {
           </div>
         </section>
       )}
-{tab === 'wahl' && (
-  <section className="wahl-tab space-y-8 w-full">
-    {/* --- BAND SELECTION TABS --- */}
-    <div className="bg-white rounded-2xl shadow p-5">
-      <div className="flex flex-wrap items-center gap-4 mb-4">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium text-gray-700">Anzahl Bänder:</span>
-          <select
-            value={activeBandCount}
-            onChange={(e) => {
-              const count = Number(e.target.value);
-              setActiveBandCount(count);
-              if (!getBandIds(count).includes(activeBand)) {
-                setActiveBand(getBandIds(count)[0]);
-              }
-            }}
-            className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white"
-          >
-            {Array.from({ length: MAX_BANDS - 1 }, (_, i) => i + 2).map(n => (
-              <option key={n} value={n}>{n} Bänder</option>
-            ))}
-          </select>
-        </div>
-      </div>
-      <div className="flex flex-wrap gap-2 mb-6">
-        {activeBandIds.map(bandId => (
-          <button
-            key={bandId}
-            onClick={() => setActiveBand(bandId)}
-            className={`px-4 py-2 rounded-lg font-semibold transition-all duration-200 shadow-sm text-sm ${
-              activeBand === bandId
-                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
-                : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-            }`}
-          >
-            {getBandLabel(bandId)}
-          </button>
-        ))}
-      </div>
+{tab === 'trimester' && (
+        <section className="section">
+          <TrimesterManagementPanel
+            trimesterPlans={trimesterPlans}
+            setTrimesterPlans={setTrimesterPlans}
+            selectedKey={selectedTrimesterPlanKey}
+            setSelectedKey={setSelectedTrimesterPlanKey}
+            workshops={workshops}
+            workshopColors={workshopColors}
+            workshopTeachers={workshopTeachers}
+            workshopRooms={workshopRooms}
+            klassenStufenPool={klassenStufenPool}
+            getWorkshopCapacity={getWorkshopCapacity}
+            getDefaultSchoolYear={getDefaultSchoolYear}
+            updateWorkshopCapacity={updateWorkshopCapacity}
+            updateWorkshopRoom={updateWorkshopRoom}
+            updateWorkshopTeacher={updateWorkshopTeacher}
+            students={students}
+            studentClasses={studentClasses}
+            studentEnrollmentYears={studentEnrollmentYears}
+            rules={rules}
+            confirmedAssignments={confirmedAssignments}
+            ruleAppliesToStudent={ruleAppliesToStudent}
+            ruleEnforcesNow={ruleEnforcesNow}
+            getRequiredFolgekurs={getRequiredFolgekurs}
+            parseSchoolYearKey={parseSchoolYearKey}
+            loadChoicesForTrimesterKey={loadChoicesForTrimesterKey}
+            studentComments={studentComments}
+          />
+        </section>
+      )}
 
-      {/* --- TRIMESTER SELECTION --- */}
-      <div className="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-xl p-5 mb-6 shadow-md border-2 border-indigo-200">
-        <div className="flex items-center justify-between flex-wrap gap-4">
-          <div className="flex items-center gap-3">
-            <div className="flex items-center justify-center w-12 h-12 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg">
-              <svg className="w-6 h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-              </svg>
-            </div>
-            <div>
-              <div className="text-sm text-gray-600 font-medium">Aktuelles Semester</div>
-              <div className="text-lg font-bold text-indigo-900">
-                {formatYearTrimester(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
-              </div>
-            </div>
-          </div>
-          <button
-            onClick={() => setShowTrimesterDialog(true)}
-            className="px-5 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 text-white text-sm font-semibold rounded-lg shadow-md hover:from-indigo-700 hover:to-indigo-800 hover:shadow-lg transition-all duration-200 flex items-center gap-2"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+{tab === 'wahl' && (
+  <section className="wahl-tab space-y-6 w-full">
+    {!wahlTrimesterDefined && (
+      <div className="bg-amber-50 border border-amber-300 rounded-2xl p-5 text-amber-950">
+        <p className="font-semibold">Kein Trimester-Plan für die aktuelle Auswahl</p>
+        <p className="text-sm mt-1">Legen Sie unter „Trimester“ ein Trimester an, bevor Sie Wahlen hochladen oder zuordnen.</p>
+        <button type="button" onClick={() => setTab('trimester')} className="mt-3 px-4 py-2 bg-teal-600 text-white text-sm font-semibold rounded-lg hover:bg-teal-700">
+          Trimester-Management öffnen
+        </button>
+      </div>
+    )}
+    <div className={!wahlTrimesterDefined ? 'opacity-60 pointer-events-none space-y-6' : 'space-y-6'}>
+    {/* Kontext: Trimester & Band-Anzahl */}
+    <div className="bg-white rounded-2xl shadow p-5 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex items-center justify-center w-11 h-11 rounded-full bg-indigo-600 text-white shadow-md flex-shrink-0">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
-            Anderes Trimester wählen
+          </div>
+          <div>
+            <div className="text-xs text-gray-500 font-medium uppercase tracking-wide">Aktuelles Trimester</div>
+            <div className="text-lg font-bold text-gray-900">
+              {formatYearTrimester(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          {activeTrimesterPlan ? (
+            <span className="text-sm text-gray-600">
+              <span className="font-medium">{activeTrimesterPlan.bandCount} Bänder</span>
+              {' · '}
+              <span className="font-medium">{activeTrimesterWahlCount} Wahlen</span> pro Schüler
+            </span>
+          ) : (
+            <label className="flex items-center gap-2 text-sm text-gray-700">
+              <span className="font-medium whitespace-nowrap">Parallel-Bänder:</span>
+              <select
+                value={activeBandCount}
+                onChange={(e) => {
+                  const count = Number(e.target.value);
+                  setActiveBandCount(count);
+                  if (!getBandIds(count).includes(activeBand)) {
+                    setActiveBand(getBandIds(count)[0]);
+                  }
+                }}
+                className="px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium bg-white"
+              >
+                {Array.from({ length: MAX_BANDS - 1 }, (_, i) => i + 2).map(n => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </label>
+          )}
+          <button
+            type="button"
+            onClick={() => setShowTrimesterDialog(true)}
+            className="px-4 py-2 bg-indigo-600 text-white text-sm font-semibold rounded-lg shadow-sm hover:bg-indigo-700 transition-colors"
+          >
+            Trimester wechseln
           </button>
         </div>
       </div>
 
-      {/* --- TOP SECTION: Upload + AutoAssign Results + Buttons --- */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Wahl Upload */}
-        <div className="bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6 shadow-sm border border-gray-200">
-          <h3 className="text-lg font-semibold mb-4 text-gray-800 border-b border-gray-300 pb-2">
-            Wahl-Daten ({getBandLabel(activeBand)})
-          </h3>
+      <div className="border-t border-gray-100 pt-4">
+        <div className="text-xs font-medium text-gray-500 mb-2">Band auswählen — Upload, Auto-Zuordnung und manuelle Anpassung beziehen sich auf dieses Band:</div>
+        {bandSwitcher}
+      </div>
+    </div>
 
-          {!Object.keys(getChoicesForBand(activeBand)).length && (
-            <div className="text-gray-500 italic">
-              Keine Daten. Verwende „Simuliere Datei-Upload", um Beispieldaten zu laden.
+    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
+      {/* Schritt 1: Wahl-Upload & Vorschau */}
+      <div className="xl:col-span-2 bg-white rounded-xl p-6 shadow-sm border border-gray-200 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-3 border-b border-gray-200 pb-3">
+          <div>
+            <div className="text-xs font-semibold text-blue-600 uppercase tracking-wide">Schritt 1</div>
+            <h3 className="text-lg font-semibold text-gray-900">Wahl-Datei — {getBandLabel(activeBand)}</h3>
+            <p className="text-sm text-gray-500 mt-1">
+              CSV oder Excel mit Schülernamen, Klasse und{' '}
+              {activeTrimesterWahlCount === 1
+                ? '1. Wahl'
+                : `1.–${activeTrimesterWahlCount}. Wahl`}
+              {' '}für dieses Band (laut Trimester-Plan).
+            </p>
+          </div>
+          <label className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg shadow-sm cursor-pointer transition-colors whitespace-nowrap">
+            <input
+              ref={el => { fileInputRefs.current[activeBand] = el; }}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={(e) => handleFileUpload(e, activeBand)}
+              className="hidden"
+            />
+            Datei hochladen
+          </label>
+        </div>
+
+        {!Object.keys(getChoicesForBand(activeBand)).length && (
+          <div className="p-4 bg-gray-50 rounded-lg border border-dashed border-gray-300 text-sm text-gray-600">
+            Für {getBandLabel(activeBand)} liegen noch keine Wahldaten vor. Laden Sie eine Datei hoch — bei abweichenden Spaltennamen öffnet sich die Spaltenzuordnung automatisch.
+          </div>
+        )}
+
+        {uploadSummary && uploadSummary.band === getBandLabel(activeBand) && (
+          <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
+            <div className="flex justify-between items-center mb-2">
+              <h4 className="font-semibold text-gray-800 text-sm">Upload-Zusammenfassung</h4>
+              <button type="button" onClick={() => setUploadSummary(null)} className="text-gray-500 hover:text-gray-700">×</button>
             </div>
-          )}
+            <div className="text-sm space-y-2">
+              {uploadSummary.newStudents.length > 0 && (
+                <p className="text-green-800"><strong>Neue Schüler:</strong> {uploadSummary.newStudents.length}</p>
+              )}
+              {uploadSummary.updatedClasses.length > 0 && (
+                <p className="text-blue-800"><strong>Klassen aktualisiert:</strong> {uploadSummary.updatedClasses.length}</p>
+              )}
+              {uploadSummary.newWorkshops.length > 0 && (
+                <p className="text-purple-800"><strong>Neue Werkstätten:</strong> {uploadSummary.newWorkshops.length}</p>
+              )}
+              {uploadSummary.updatedChoices > 0 && (
+                <p className="text-amber-800"><strong>Wahlen aktualisiert:</strong> {uploadSummary.updatedChoices} Schüler</p>
+              )}
+              {uploadSummary.inferredEnrollmentYears?.length > 0 && (
+                <p className="text-teal-800">
+                  <strong>Einschulungsjahr neu gesetzt:</strong>{' '}
+                  {uploadSummary.inferredEnrollmentYears.length} Schüler (beim ersten Wahl-Upload)
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
-          <div className="max-h-[300px] overflow-y-auto border-t border-gray-200 mt-2 pt-2 text-sm">
+        <div>
+          <div className="text-sm font-medium text-gray-700 mb-2">Wahl-Vorschau ({Object.keys(getChoicesForBand(activeBand)).length} Schüler)</div>
+          <div className="max-h-[320px] overflow-y-auto border border-gray-200 rounded-lg text-sm">
             {Object.entries(getChoicesForBand(activeBand)).slice(0, 150).map(([student, choices]) => {
               const needsAssistant = studentAssistants[student];
               return (
@@ -4823,155 +6545,64 @@ export default function WerkstattVerwaltungApp() {
                       </span>
                     )}
                   </div>
-                  <div>
-                    <span 
-                      className="px-3 py-1 rounded-lg text-xs mr-2 shadow-sm font-medium"
-                      style={{
-                        backgroundColor: workshopColors[choices[0]] ? `${workshopColors[choices[0]]}20` : undefined,
-                        borderLeft: workshopColors[choices[0]] ? `3px solid ${workshopColors[choices[0]]}` : undefined,
-                        color: workshopColors[choices[0]] || undefined
-                      }}
-                    >
-                      1. {choices[0] || '—'}
-                    </span>
-                    <span 
-                      className="px-3 py-1 rounded-lg text-xs shadow-sm font-medium"
-                      style={{
-                        backgroundColor: workshopColors[choices[1]] ? `${workshopColors[choices[1]]}20` : undefined,
-                        borderLeft: workshopColors[choices[1]] ? `3px solid ${workshopColors[choices[1]]}` : undefined,
-                        color: workshopColors[choices[1]] || undefined
-                      }}
-                    >
-                      2. {choices[1] || '—'}
-                    </span>
+                  <div className="flex flex-wrap justify-end gap-1 max-w-[55%]">
+                    {Array.from({ length: activeTrimesterWahlCount }, (_, i) => {
+                      const c = choices[i];
+                      return (
+                        <span
+                          key={i}
+                          className="px-3 py-1 rounded-lg text-xs shadow-sm font-medium"
+                          style={{
+                            backgroundColor: workshopColors[c] ? `${workshopColors[c]}20` : undefined,
+                            borderLeft: workshopColors[c] ? `3px solid ${workshopColors[c]}` : undefined,
+                            color: workshopColors[c] || undefined,
+                          }}
+                        >
+                          {i + 1}. {c || '—'}
+                        </span>
+                      );
+                    })}
                   </div>
                 </div>
               );
             })}
           </div>
         </div>
+      </div>
 
-        {/* AutoAssign Results + Buttons */}
-        <div className="bg-gradient-to-br from-blue-50 to-indigo-100 rounded-xl p-6 shadow-sm border border-blue-200">
-          <h3 className="text-lg font-semibold mb-4 text-blue-900 border-b border-blue-300 pb-2">
-            Automatische Zuweisung
-          </h3>
+      {/* Schritt 2: Auto-Zuordnung */}
+      <div className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl p-6 shadow-sm border border-emerald-200 flex flex-col">
+        <div className="border-b border-emerald-200 pb-3 mb-4">
+          <div className="text-xs font-semibold text-emerald-700 uppercase tracking-wide">Schritt 2</div>
+          <h3 className="text-lg font-semibold text-gray-900">Automatische Zuordnung</h3>
+          <p className="text-sm text-gray-600 mt-1">
+            Berücksichtigt bereits zugeordnete andere Bänder (gleiche Werkstatt / Parallel-Regeln).
+          </p>
+        </div>
 
-          <div className="mb-4 flex flex-wrap gap-3">
-            <div className="flex flex-col gap-3">
-              {activeBandIds.map((bandId, idx) => {
-                const colors = [
-                  'from-blue-500 to-blue-600 hover:from-blue-600 hover:to-blue-700',
-                  'from-purple-500 to-purple-600 hover:from-purple-600 hover:to-purple-700',
-                  'from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700',
-                  'from-orange-500 to-orange-600 hover:from-orange-600 hover:to-orange-700',
-                  'from-pink-500 to-pink-600 hover:from-pink-600 hover:to-pink-700',
-                  'from-indigo-500 to-indigo-600 hover:from-indigo-600 hover:to-indigo-700',
-                ];
-                return (
-                  <label key={bandId} className={`px-4 py-2 bg-gradient-to-r ${colors[idx % colors.length]} text-white text-sm font-medium rounded-lg shadow-sm hover:shadow-md transition-all duration-200 cursor-pointer text-center`}>
-                    <input
-                      ref={el => { fileInputRefs.current[bandId] = el; }}
-                      type="file"
-                      accept=".csv,.xlsx,.xls"
-                      onChange={(e) => handleFileUpload(e, bandId)}
-                      className="hidden"
-                    />
-                    📁 {getBandLabel(bandId)} hochladen (CSV/XLSX)
-                  </label>
-                );
-              })}
-            </div>
-            <button 
-              onClick={runAutoAssign} 
-              className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200"
-            >
-              Auto-Zuordnung starten
-            </button>
-          </div>
-
-          {/* Upload Summary */}
-          {uploadSummary && (
-            <div className="mt-4 bg-white rounded-lg p-4 border-2 border-blue-300 shadow-md">
-              <div className="flex justify-between items-center mb-3">
-                <h4 className="text-lg font-semibold text-gray-800">
-                  📊 Upload-Zusammenfassung {uploadSummary.band && `(${uploadSummary.band})`}
-                </h4>
-                <button 
-                  onClick={() => setUploadSummary(null)}
-                  className="text-gray-500 hover:text-gray-700 text-xl"
-                >
-                  ×
-                </button>
-              </div>
-              
-              <div className="space-y-3">
-                {uploadSummary.newStudents.length > 0 && (
-                  <div className="bg-green-50 border border-green-200 rounded-lg p-3">
-                    <div className="font-semibold text-green-800 mb-2">
-                      ✅ Neue Schüler hinzugefügt ({uploadSummary.newStudents.length}):
-                    </div>
-                    <div className="text-sm text-green-700 max-h-32 overflow-y-auto">
-                      {uploadSummary.newStudents.join(', ')}
-                    </div>
-                  </div>
-                )}
-
-                {uploadSummary.updatedClasses.length > 0 && (
-                  <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
-                    <div className="font-semibold text-blue-800 mb-2">
-                      🔄 Klassen aktualisiert ({uploadSummary.updatedClasses.length}):
-                    </div>
-                    <div className="text-sm text-blue-700 max-h-32 overflow-y-auto space-y-1">
-                      {uploadSummary.updatedClasses.map((item, idx) => (
-                        <div key={idx}>
-                          <strong>{item.student}:</strong> {item.old || '(keine)'} → {item.new}
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {uploadSummary.newWorkshops.length > 0 && (
-                  <div className="bg-purple-50 border border-purple-200 rounded-lg p-3">
-                    <div className="font-semibold text-purple-800 mb-2">
-                      🏫 Neue Werkstätten hinzugefügt ({uploadSummary.newWorkshops.length}):
-                    </div>
-                    <div className="text-sm text-purple-700 max-h-32 overflow-y-auto">
-                      {uploadSummary.newWorkshops.join(', ')}
-                    </div>
-                  </div>
-                )}
-
-                {uploadSummary.updatedChoices > 0 && (
-                  <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3">
-                    <div className="font-semibold text-yellow-800">
-                      📝 Wahlen aktualisiert: {uploadSummary.updatedChoices} Schüler
-                    </div>
-                  </div>
-                )}
-
-                {uploadSummary.newStudents.length === 0 && 
-                 uploadSummary.updatedClasses.length === 0 && 
-                 uploadSummary.newWorkshops.length === 0 && 
-                 uploadSummary.updatedChoices === 0 && (
-                  <div className="bg-gray-50 border border-gray-200 rounded-lg p-3">
-                    <div className="text-sm text-gray-600">
-                      Keine Änderungen erkannt.
-                    </div>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
+        <div className="space-y-2 mb-4">
+          <button
+            type="button"
+            onClick={() => runAutoAssignForBand(activeBand)}
+            className="w-full px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg shadow-sm transition-colors"
+          >
+            Auto-Zuordnung: {getBandLabel(activeBand)}
+          </button>
+          <button
+            type="button"
+            onClick={runAutoAssign}
+            className="w-full px-4 py-2.5 bg-white border-2 border-emerald-600 text-emerald-800 hover:bg-emerald-50 text-sm font-semibold rounded-lg transition-colors"
+          >
+            Alle {activeBandCount} Bänder nacheinander zuordnen
+          </button>
+        </div>
 
           {/* Display statistics - use currentStatistics if available, otherwise autoResult */}
-          {(Object.keys(dragAssignments.erstesBand).length > 0 || Object.keys(dragAssignments.zweitesBand).length > 0 || autoResult) && (
+          {(hasAnyAssignmentInBands(dragAssignments, activeBandIds) || autoResult) && (
             <>
               <div className="text-gray-700 mb-3 text-sm">
                 {(() => {
-                  const stats = (Object.keys(dragAssignments.erstesBand).length > 0 || Object.keys(dragAssignments.zweitesBand).length > 0) 
+                  const stats = hasAnyAssignmentInBands(dragAssignments, activeBandIds)
                     ? currentStatistics 
                     : autoResult;
                   
@@ -4985,27 +6616,25 @@ export default function WerkstattVerwaltungApp() {
                       <p>
                         Erste Wahl: <b>{stats.totalFirst}</b> | Zweite Wahl: <b>{stats.totalSecond}</b>
                       </p>
-                      <div className="mt-2 text-xs space-y-1">
-                        <div className="font-semibold">Erstes Band:</div>
-                        <div className="ml-3">
-                          {stats.erstesBand.total > 0 ? (
-                            <>
-                              <strong>{stats.erstesBand.percentFirst.toFixed(2)}%</strong> erste Wahlen ({stats.erstesBand.num1} erste, {stats.erstesBand.num2} zweite von {stats.erstesBand.total} Zuweisungen)
-                            </>
-                          ) : (
-                            <>Keine Zuweisungen mit Wahlen</>
-                          )}
-                        </div>
-                        <div className="font-semibold mt-2">Zweites Band:</div>
-                        <div className="ml-3">
-                          {stats.zweitesBand.total > 0 ? (
-                            <>
-                              <strong>{stats.zweitesBand.percentFirst.toFixed(2)}%</strong> erste Wahlen ({stats.zweitesBand.num1} erste, {stats.zweitesBand.num2} zweite von {stats.zweitesBand.total} Zuweisungen)
-                            </>
-                          ) : (
-                            <>Keine Zuweisungen mit Wahlen</>
-                          )}
-                        </div>
+                      <div className="mt-2 text-xs space-y-2">
+                        {activeBandIds.map(bandId => {
+                          const bandStats = stats.perBand?.[bandId] || 
+                            (bandId === 'erstesBand' ? stats.erstesBand : bandId === 'zweitesBand' ? stats.zweitesBand : null);
+                          return (
+                            <div key={bandId}>
+                              <div className="font-semibold">{getBandLabel(bandId)}:</div>
+                              <div className="ml-3">
+                                {bandStats && bandStats.total > 0 ? (
+                                  <>
+                                    <strong>{bandStats.percentFirst.toFixed(2)}%</strong> erste Wahlen ({bandStats.num1} erste, {bandStats.num2} zweite von {bandStats.total} Zuweisungen)
+                                  </>
+                                ) : (
+                                  <>Keine Zuweisungen mit Wahlen</>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })}
                         <div className="mt-2 p-2 bg-blue-50 rounded border border-blue-200">
                           <div className="font-semibold text-blue-800 flex items-center">
                             <div className="w-2 h-2 bg-blue-600 rounded-full mr-2"></div>
@@ -5061,12 +6690,15 @@ export default function WerkstattVerwaltungApp() {
         </div>
       </div>
 
-      {/* --- BOTTOM SECTION: Drag & Drop Grid --- */}
-      <div className="mt-6 bg-gradient-to-br from-purple-50 to-violet-100 rounded-xl p-6 shadow-sm border border-purple-200">
+      {/* Schritt 3: Manuelle Anpassung */}
+      <div className="bg-gradient-to-br from-purple-50 to-violet-100 rounded-xl p-6 shadow-sm border border-purple-200">
         <div className="flex items-center justify-between mb-4 border-b border-purple-300 pb-2">
-          <h3 className="text-lg font-semibold text-purple-900">
-            Manuelle Anpassung ({getBandLabel(activeBand)})
-          </h3>
+          <div>
+            <div className="text-xs font-semibold text-purple-700 uppercase tracking-wide">Schritt 3</div>
+            <h3 className="text-lg font-semibold text-purple-900">
+              Manuelle Anpassung — {getBandLabel(activeBand)}
+            </h3>
+          </div>
           {/* Student Search */}
           <div className="flex items-center gap-2">
             <div className="relative">
@@ -5127,140 +6759,83 @@ export default function WerkstattVerwaltungApp() {
           </div>
         </div>
 
-        {/* Warning for students with same workshop in both bands */}
-        {(() => {
-          const conflicts = getStudentsWithSameWorkshopInBothBands();
-          if (conflicts.length > 0) {
-            const warningKey = 'same-workshop-both-bands';
-            const isChecked = checkedWarnings[warningKey] || false;
+        {bandWarningGroups().map(group => {
+          const bandLabel = getBandLabel(group.bandId);
+          const cards = [];
+          if (group.missing.length) {
+            cards.push({
+              key: `no-votes-${group.bandId}`,
+              tone: 'amber',
+              title: `${group.missing.length} erwartete ${group.missing.length === 1 ? 'Stimme fehlt' : 'Stimmen fehlen'} (${bandLabel})`,
+              lines: group.missing.map(student => `${student}${studentClasses[student] ? ` (${studentClasses[student]})` : ''}`),
+            });
+          }
+          if (group.selfParallel.length) {
+            cards.push({
+              key: `self-parallel-${group.bandId}`,
+              tone: 'yellow',
+              title: `${group.selfParallel.length} ${group.selfParallel.length === 1 ? 'Zuordnung verletzt' : 'Zuordnungen verletzen'} „nicht parallel zu sich selbst“ (${bandLabel})`,
+              lines: group.selfParallel.map(item => `${item.student}: ${item.workshop} auch in ${getBandLabel(item.otherBandId)}`),
+            });
+          }
+          if (group.ruleParallel.length) {
+            cards.push({
+              key: `rule-parallel-${group.bandId}`,
+              tone: 'red',
+              title: `${group.ruleParallel.length} ${group.ruleParallel.length === 1 ? 'Zuordnung verletzt' : 'Zuordnungen verletzen'} eine Parallel-Regel (${bandLabel})`,
+              lines: group.ruleParallel.map(item => `${item.student}: ${item.workshop} neben ${item.otherWorkshop} in ${getBandLabel(item.otherBandId)}`),
+            });
+          }
+          if (group.sameFirst.length) {
+            cards.push({
+              key: `same-first-${group.bandId}`,
+              tone: 'orange',
+              title: `${group.sameFirst.length} ${group.sameFirst.length === 1 ? 'Schüler hat' : 'Schüler haben'} dieselbe erste Wahl wie in einem anderen Band (${bandLabel})`,
+              lines: group.sameFirst.map(item => `${item.student}: ${item.workshop} auch erste Wahl in ${getBandLabel(item.otherBandId)}`),
+            });
+          }
+          return cards.map(card => {
+            const isChecked = checkedWarnings[card.key] || false;
+            const tone = {
+              amber: 'bg-amber-50 border-amber-400 text-amber-800',
+              yellow: 'bg-yellow-50 border-yellow-400 text-yellow-800',
+              red: 'bg-red-50 border-red-300 text-red-800',
+              orange: 'bg-orange-50 border-orange-400 text-orange-800',
+            }[card.tone];
             return (
-              <div className={`mb-4 bg-yellow-50 border-2 border-yellow-400 rounded-lg p-4 ${isChecked ? 'opacity-60' : ''}`}>
+              <div key={card.key} className={`mb-4 rounded-lg border-2 p-4 ${tone} ${isChecked ? 'opacity-60' : ''}`}>
                 <div className="flex items-start gap-2">
                   <input
                     type="checkbox"
                     checked={isChecked}
-                    onChange={() => toggleWarningCheck(warningKey)}
+                    onChange={() => toggleWarningCheck(card.key)}
                     className="mt-0.5 cursor-pointer"
                   />
-                  <svg className="w-5 h-5 text-yellow-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
                   <div className="flex-1">
-                    <div className={`font-semibold text-yellow-800 mb-1 ${isChecked ? 'line-through' : ''}`}>
-                      ⚠️ Warnung: {conflicts.length} Schüler {conflicts.length === 1 ? 'ist' : 'sind'} in beiden Bändern derselben Werkstatt zugeordnet
-                    </div>
-                    <div className="text-sm text-yellow-700 space-y-1">
-                      {conflicts.map((conflict, idx) => (
-                        <div key={idx} className={isChecked ? 'line-through opacity-60' : ''}>
-                          <strong>{conflict.student}</strong>: {conflict.workshop} (Erstes & Zweites Band)
-                        </div>
+                    <div className={`font-semibold mb-1 ${isChecked ? 'line-through' : ''}`}>{card.title}</div>
+                    <div className={`text-sm max-h-32 overflow-y-auto space-y-0.5 ${isChecked ? 'line-through opacity-60' : ''}`}>
+                      {card.lines.slice(0, 12).map(line => (
+                        <div key={line}>{line}</div>
                       ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          }
-          return null;
-        })()}
-
-        {/* Warning for students with same first choice in both bands */}
-        {(() => {
-          const conflicts = getStudentsWithSameFirstChoiceInBothBands();
-          if (conflicts.length > 0) {
-            const warningKey = 'same-first-choice-both-bands';
-            const isChecked = checkedWarnings[warningKey] || false;
-            return (
-              <div className={`mb-4 bg-orange-50 border-2 border-orange-400 rounded-lg p-4 ${isChecked ? 'opacity-60' : ''}`}>
-                <div className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() => toggleWarningCheck(warningKey)}
-                    className="mt-0.5 cursor-pointer"
-                  />
-                  <svg className="w-5 h-5 text-orange-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                  <div className="flex-1">
-                    <div className={`font-semibold text-orange-800 mb-1 ${isChecked ? 'line-through' : ''}`}>
-                      ⚠️ Warnung: {conflicts.length} Schüler {conflicts.length === 1 ? 'hat' : 'haben'} dieselbe erste Wahl in beiden Bändern
-                    </div>
-                    <div className="text-sm text-orange-700 space-y-1">
-                      {conflicts.map((conflict, idx) => (
-                        <div key={idx} className={isChecked ? 'line-through opacity-60' : ''}>
-                          <strong>{conflict.student}</strong>: {conflict.workshop} (Erstes & Zweites Band)
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            );
-          }
-          return null;
-        })()}
-
-        {/* Warning for students without votes - separate for each band */}
-        {(() => {
-          const erstesBandNoVotes = students.filter(s => hasNoVotesForBand(s, 'erstesBand'));
-          const zweitesBandNoVotes = students.filter(s => hasNoVotesForBand(s, 'zweitesBand'));
-          const warnings = [];
-          
-          if (erstesBandNoVotes.length > 0) {
-            warnings.push({ band: 'erstesBand', bandLabel: 'Erstes Band', students: erstesBandNoVotes });
-          }
-          if (zweitesBandNoVotes.length > 0) {
-            warnings.push({ band: 'zweitesBand', bandLabel: 'Zweites Band', students: zweitesBandNoVotes });
-          }
-          
-          if (warnings.length === 0) return null;
-          
-          return warnings.map((warning, warningIdx) => {
-            const warningKey = `no-votes-${warning.band}`;
-            const isChecked = checkedWarnings[warningKey] || false;
-            return (
-              <div key={warningIdx} className={`mb-4 bg-amber-50 border-2 border-amber-400 rounded-lg p-4 ${isChecked ? 'opacity-60' : ''}`}>
-                <div className="flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={isChecked}
-                    onChange={() => toggleWarningCheck(warningKey)}
-                    className="mt-0.5 cursor-pointer"
-                  />
-                  <svg className="w-5 h-5 text-amber-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-                  </svg>
-                  <div className="flex-1">
-                    <div className={`font-semibold text-amber-800 mb-1 ${isChecked ? 'line-through' : ''}`}>
-                      ⚠️ {warning.students.length} Schüler {warning.students.length === 1 ? 'hat' : 'haben'} keine Wahlen abgegeben ({warning.bandLabel})
-                    </div>
-                    <div className={`text-sm text-amber-700 max-h-32 overflow-y-auto ${isChecked ? 'line-through opacity-60' : ''}`}>
-                      {warning.students.slice(0, 10).map((student, idx) => (
-                        <span key={idx}>
-                          {student}
-                          {idx < Math.min(warning.students.length - 1, 9) && ', '}
-                        </span>
-                      ))}
-                      {warning.students.length > 10 && ` ... und ${warning.students.length - 10} weitere`}
+                      {card.lines.length > 12 && <div>… und {card.lines.length - 12} weitere</div>}
                     </div>
                   </div>
                 </div>
               </div>
             );
           });
-        })()}
+        })}
 
         <div className="relative">
           {/* Top scrollbar container - mirror of main content for visual scrollbar */}
           <div ref={topScrollbarRef} className="overflow-x-auto w-full mb-2" style={{ scrollbarWidth: 'thin', height: '17px' }}>
             <div className="flex gap-4" style={{ minWidth: 'max-content', width: '100%' }}>
-              {Object.keys(workshops).filter(w => isWorkshopAvailableInBand(workshops, w, activeBand)).map((w) => (
-                <div key={w} className="flex-shrink-0" style={{ width: `${Math.max(220, Math.min(280, windowWidth / (Object.keys(workshops).filter(w => isWorkshopAvailableInBand(workshops, w, activeBand)).length + 1) - 40))}px` }}>
+              {wahlVisibleWorkshops.map((w) => (
+                <div key={w} className="flex-shrink-0" style={{ width: `${Math.max(220, Math.min(280, windowWidth / (wahlVisibleWorkshops.length + 1) - 40))}px` }}>
                   {/* Empty div to match workshop width */}
                 </div>
               ))}
-              <div className="flex-shrink-0" style={{ width: `${Math.max(220, Math.min(280, windowWidth / (Object.keys(workshops).filter(w => isWorkshopAvailableInBand(workshops, w, activeBand)).length + 1) - 40))}px` }}>
+              <div className="flex-shrink-0" style={{ width: `${Math.max(220, Math.min(280, windowWidth / (wahlVisibleWorkshops.length + 1) - 40))}px` }}>
                 {/* Empty div for "Nicht Zugeordnet" column */}
               </div>
             </div>
@@ -5275,9 +6850,9 @@ export default function WerkstattVerwaltungApp() {
             }}
           >
           <div className="flex gap-4 h-full" style={{ minWidth: 'max-content', width: '100%', minHeight: '500px' }}>
-            {Object.keys(workshops).filter(w => isWorkshopAvailableInBand(workshops, w, activeBand)).map((w) => {
+            {wahlVisibleWorkshops.map((w) => {
               const currentCount = getCurrentWorkshopCounts()[w] || 0;
-              const capacity = getWorkshopCapacity(workshops[w], w);
+              const capacity = getWahlWorkshopCapacity(w);
               const isHovering = dragHover.workshop === w;
               const violationMessage = dropViolations[w];
               const persistentViols = persistentViolations[w] || {};
@@ -5290,7 +6865,7 @@ export default function WerkstattVerwaltungApp() {
                   style={{ 
                     minWidth: '220px', 
                     maxWidth: '280px',
-                    width: `${Math.max(220, Math.min(280, windowWidth / (Object.keys(workshops).filter(w => isWorkshopAvailableInBand(workshops, w, activeBand)).length + 1) - 40))}px`,
+                    width: `${Math.max(220, Math.min(280, windowWidth / (wahlVisibleWorkshops.length + 1) - 40))}px`,
                     minHeight: '500px'
                   }}
                   onDragOver={(e) => handleDragOver(e, w)}
@@ -5419,6 +6994,13 @@ export default function WerkstattVerwaltungApp() {
                   ...prev,
                   [activeBand]: { ...prev[activeBand], [student]: 'Nicht Zugeordnen' }
                 }));
+                if (!studentExpectedOnBand(student, activeBand)) {
+                  setExtraUnassignedByBand(prev => {
+                    const list = prev[activeBand] || [];
+                    if (list.includes(student)) return prev;
+                    return { ...prev, [activeBand]: [...list, student] };
+                  });
+                }
                 
                 // Clear all persistent violations for this student
                 setPersistentViolations(prev => {
@@ -5442,19 +7024,12 @@ export default function WerkstattVerwaltungApp() {
               <div className="flex justify-between mb-2">
                 <span className="font-semibold text-sm">Nicht Zugeordnet</span>
                 <span className="text-xs text-gray-500">
-                  {students.filter(s => {
-                    const assignment = getAssignmentsForBand(activeBand)[s];
-                    return !assignment || assignment === 'Nicht Zugeordnet' || assignment === 'Nicht Zugeordnen';
-                  }).length}
+                  {unassignedStudentsForBand(activeBand).length}
                 </span>
               </div>
 
               <div className="space-y-1 min-h-[80px]">
-                {students
-                  .filter(s => {
-                    const assignment = getAssignmentsForBand(activeBand)[s];
-                    return !assignment || assignment === 'Nicht Zugeordnet' || assignment === 'Nicht Zugeordnen' || assignment === undefined || assignment === null;
-                  })
+                {unassignedStudentsForBand(activeBand)
                   .map((s) => (
                     <div
                       key={s}
@@ -5500,35 +7075,56 @@ export default function WerkstattVerwaltungApp() {
                     </div>
                   ))}
               </div>
+              <div className="mt-3 border-t border-orange-300 pt-3">
+                <label className="block text-[11px] font-semibold text-slate-600 mb-1">Schüler hinzufügen</label>
+                <input
+                  type="text"
+                  value={addUnassignedQuery}
+                  onChange={(e) => setAddUnassignedQuery(e.target.value)}
+                  placeholder="Name suchen…"
+                  className="w-full px-2 py-1.5 text-xs border-2 border-slate-400 rounded-lg bg-white"
+                />
+                {addUnassignedQuery.trim() && (
+                  <div className="mt-1 max-h-36 overflow-y-auto rounded-lg border-2 border-slate-300 bg-white">
+                    {(() => {
+                      const query = addUnassignedQuery.trim().toLowerCase();
+                      const shown = new Set(unassignedStudentsForBand(activeBand));
+                      const matches = students.filter(student => {
+                        if (!student.toLowerCase().includes(query)) return false;
+                        if (!isOpenAssignment(dragAssignments[activeBand]?.[student])) return false;
+                        return !shown.has(student);
+                      }).slice(0, 8);
+                      if (!matches.length) {
+                        return <div className="px-2 py-1.5 text-xs text-slate-500">Kein Treffer</div>;
+                      }
+                      return matches.map(student => (
+                        <button
+                          key={student}
+                          type="button"
+                          onClick={() => addStudentToUnassigned(student)}
+                          className="flex w-full items-center justify-between gap-2 px-2 py-1.5 text-left text-xs hover:bg-orange-50"
+                        >
+                          <span className="font-medium text-slate-800">{student}</span>
+                          <span className="text-slate-500">
+                            {studentClasses[student] || '—'}
+                            {studentEnrollmentYears[student] ? ` · ${studentEnrollmentYears[student]}` : ''}
+                          </span>
+                        </button>
+                      ));
+                    })()}
+                  </div>
+                )}
+              </div>
               </div>
               </div>
             </div>
           </div>
         </div>
         
-        {/* Band Selection Buttons at Bottom */}
-        <div className="flex justify-center gap-4 mt-6 pt-4 border-t border-purple-300">
-          <button
-            onClick={() => setActiveBand('erstesBand')}
-            className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
-              activeBand === 'erstesBand'
-                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
-                : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-            }`}
-          >
-            Erstes Band
-          </button>
-          <button
-            onClick={() => setActiveBand('zweitesBand')}
-            className={`px-6 py-3 rounded-lg font-semibold transition-all duration-200 shadow-sm ${
-              activeBand === 'zweitesBand'
-                ? 'bg-gradient-to-r from-blue-600 to-blue-700 text-white shadow-lg transform scale-105'
-                : 'bg-gradient-to-r from-gray-100 to-gray-200 text-gray-700 hover:from-gray-200 hover:to-gray-300 hover:shadow-md'
-            }`}
-          >
-            Zweites Band
-          </button>
-        </div>
+      </div>
+      <div className="bg-white rounded-2xl shadow p-5">
+        <div className="text-xs font-medium text-gray-500 mb-2">Band auswählen — Upload, Auto-Zuordnung und manuelle Anpassung beziehen sich auf dieses Band:</div>
+        {bandSwitcher}
       </div>
     </div>
   </section>
@@ -5537,7 +7133,8 @@ export default function WerkstattVerwaltungApp() {
 {tab === 'reports' && (
   <section className="reports-tab space-y-8">
     <div className="bg-white rounded-2xl shadow-lg p-6">
-      <h2 className="text-2xl font-bold text-gray-800 mb-6 border-b border-gray-300 pb-3">Berichte herunterladen</h2>
+      <h2 className="text-2xl font-bold text-gray-800 mb-2">Berichte herunterladen</h2>
+      <p className="text-sm text-gray-600 mb-6">PDF- und Excel-Auswertungen für das gewählte Trimester. Backup und Import finden Sie unter <strong>Daten</strong> oben.</p>
       
       {/* School Year/Trimester Selection */}
       <div className="bg-gradient-to-br from-indigo-50 via-purple-50 to-pink-50 rounded-xl p-5 mb-8 shadow-md border-2 border-indigo-200">
@@ -5657,11 +7254,9 @@ export default function WerkstattVerwaltungApp() {
         </div>
       </div>
 
-      {/* Available Data Info */}
       <div className="mt-8 bg-gradient-to-br from-gray-50 to-gray-100 rounded-xl p-6 shadow-sm border border-gray-200">
-        <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Verfügbare Daten</h3>
+        <h3 className="text-lg font-semibold text-gray-800 mb-3 border-b border-gray-300 pb-2">Verfügbare Trimester-Daten</h3>
         <div className="text-sm text-gray-600">
-          <p className="mb-2">Folgende Jahr/Trimester-Kombinationen sind verfügbar:</p>
           <div className="flex flex-wrap gap-2">
             {Object.keys(confirmedAssignments).length > 0 ? (
               Object.keys(confirmedAssignments).map(key => (
@@ -5670,7 +7265,7 @@ export default function WerkstattVerwaltungApp() {
                 </span>
               ))
             ) : (
-              <span className="text-gray-500 italic">Keine Daten verfügbar</span>
+              <span className="text-gray-500 italic">Keine gespeicherten Zuweisungen</span>
             )}
           </div>
         </div>
@@ -5681,349 +7276,372 @@ export default function WerkstattVerwaltungApp() {
 )}
 
       {tab === 'workshops' && (
-        <section className="section">
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-gradient-to-br from-blue-50 to-indigo-100 rounded-xl p-6 shadow-sm border border-blue-200">
-                <h3 className="text-xl font-semibold text-blue-900 mb-4 border-b border-blue-300 pb-3">Aktive Werkstätten</h3>
-                <div className="space-y-4 max-h-96 overflow-y-auto">
-                  {Object.entries(workshops).map(([name, workshop]) => {
-                    const cap = getWorkshopCapacity(workshop, name);
-                    const availableBands = getWorkshopAvailableBands(workshop, name);
-                    return (
-                    <div key={name} className="bg-white rounded-lg p-4 shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200">
-                      <div className="workshop-info mb-3">
-                        <div className="flex items-center gap-3 mb-2">
-                          <div className="text-lg font-semibold text-gray-800 flex-1">{name}</div>
-                          <ColorPicker 
-                            currentColor={workshopColors[name] || ''} 
-                            usedColors={Object.values(workshopColors)}
-                            allWorkshopColors={workshopColors}
-                            onColorChange={(color) => updateWorkshopColor(name, color)}
-                          />
-                        </div>
-                        <div className="text-sm text-gray-600 mb-2">Kapazität: <span className="font-semibold text-blue-600">{cap}</span></div>
-                        <div className="text-sm text-gray-600 mb-2">
-                          <label className="block mb-1">Verfügbar in:</label>
-                          <div className="flex flex-wrap gap-3">
-                            {BANDS.map(band => (
-                              <label key={band.id} className="flex items-center gap-2 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={availableBands.includes(band.id)}
-                                  onChange={(e) => {
-                                    const newBands = e.target.checked
-                                      ? [...availableBands.filter(b => b !== band.id), band.id]
-                                      : availableBands.filter(b => b !== band.id);
-                                    updateWorkshopAvailableBands(name, newBands.length > 0 ? newBands : [ALL_BAND_IDS.find(id => id !== band.id)]);
-                                  }}
-                                  className="w-4 h-4 text-blue-600"
-                                />
-                                <span>{band.label}</span>
-                              </label>
-                            ))}
-                          </div>
-                        </div>
-                        <div className="text-sm text-gray-600 mb-2">
-                          <label className="block mb-1">Lehrer:</label>
-                          <input 
-                            type="text" 
-                            value={workshopTeachers[name] || ''} 
-                            onChange={e => updateWorkshopTeacher(name, e.target.value)} 
-                            placeholder="Lehrer eingeben"
-                            className="px-3 py-1 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 w-full text-sm" 
-                          />
-                        </div>
-                        <div className="text-sm text-gray-600 mb-2">
-                          <label className="block mb-1">Raumnummer:</label>
-                          <input 
-                            type="text" 
-                            value={workshopRooms[name] || ''} 
-                            onChange={e => updateWorkshopRoom(name, e.target.value)} 
-                            placeholder="Raumnummer eingeben"
-                            className="px-3 py-1 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 w-full text-sm" 
-                          />
-                        </div>
-                        {prereqs[name] && prereqs[name].length > 0 && (
-                          <div className="text-sm text-gray-600 mb-2">
-                            Voraussetzungen: <span className="font-medium text-orange-600">{prereqs[name].join(', ')}</span>
-                          </div>
-                        )}
-                        {cannotBeParallel[name] && cannotBeParallel[name].length > 0 && (
-                          <div className="text-sm text-gray-600">
-                            Nicht parallel belegbar mit: <span className="font-medium text-red-600">{cannotBeParallel[name].join(', ')}</span>
-                          </div>
-                        )}
-                      </div>
-                      <div className="flex flex-wrap gap-2">
-                        <input 
-                          type="number" 
-                          value={cap} 
-                          onChange={e=>updateWorkshopCapacity(name, e.target.value)} 
-                          className="px-3 py-1 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent transition-all duration-200 w-20" 
-                        />
-                        <button 
-                          onClick={() => handleWorkshopClick(name)} 
-                          className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200"
-                        >
-                          Voraussetzungen
-                        </button>
-                        <button 
-                          onClick={() => handleCannotBeParallelClick(name)} 
-                          className="px-4 py-2 bg-gradient-to-r from-orange-500 to-orange-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-orange-600 hover:to-orange-700 hover:shadow-md transition-all duration-200"
-                        >
-                          Nicht parallel
-                        </button>
-                        <button 
-                          onClick={()=>deleteWorkshop(name)} 
-                          className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-red-600 hover:to-red-700 hover:shadow-md transition-all duration-200"
-                        >
-                          Löschen
-                        </button>
-                      </div>
-                    </div>
-                    );
-                  })}
-                  {Object.keys(workshops).length === 0 && (
-                    <div className="text-gray-500 italic p-4 bg-gray-50 rounded-lg text-center">
-                      Keine aktiven Werkstätten.
+        <section className="section flex flex-col min-h-[calc(100vh-10rem)]">
+          <div className="bg-white rounded-2xl shadow-lg border border-gray-200 flex flex-col flex-1 min-h-[32rem] overflow-hidden">
+            <div className="grid grid-cols-1 xl:grid-cols-5 flex-1 min-h-0">
+              <aside className="xl:col-span-2 flex flex-col min-h-[22rem] xl:min-h-0 border-b xl:border-b-0 xl:border-r border-gray-200 bg-gradient-to-b from-blue-50/80 to-indigo-50/40">
+                <div className="px-5 py-4 border-b border-blue-200/80 shrink-0 space-y-3">
+                  <div>
+                    <h3 className="text-lg font-semibold text-blue-900">Werkstätten</h3>
+                    <p className="text-xs text-blue-800/70 mt-1">
+                      {Object.keys(workshops).length} aktiv
+                      {Object.keys(archivedWorkshops).length > 0 ? ` · ${Object.keys(archivedWorkshops).length} archiviert` : ''}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveWorkshopEditor('new')}
+                    className="w-full px-4 py-2.5 rounded-lg font-semibold text-sm bg-blue-600 text-white hover:bg-blue-700 shadow-sm transition-colors"
+                  >
+                    + Neue Werkstatt
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
+                  {Object.keys(workshops).length === 0 && Object.keys(archivedWorkshops).length === 0 && (
+                    <div className="text-gray-500 italic p-6 bg-white/70 rounded-xl text-center border border-dashed border-blue-200 text-sm">
+                      Noch keine Werkstätten. Oben „Neue Werkstatt“ wählen.
                     </div>
                   )}
-                </div>
-                
-                {/* Archived Workshops Section */}
-                {Object.keys(archivedWorkshops).length > 0 && (
-                  <div className="mt-6 pt-6 border-t border-gray-300">
-                    <h3 className="text-lg font-semibold text-gray-700 mb-4">Archivierte Werkstätten</h3>
-                    <div className="space-y-4 max-h-96 overflow-y-auto">
-                      {Object.entries(archivedWorkshops).map(([name, data]) => (
-                        <div key={name} className="bg-gray-100 rounded-lg p-4 shadow-sm border border-gray-300 opacity-75">
-                          <div className="workshop-info mb-3">
-                            <div className="flex items-center gap-3 mb-2">
-                              <div className="text-lg font-semibold text-gray-600 flex-1">{name}</div>
-                              <span className="text-xs px-2 py-1 bg-gray-400 text-white rounded-full">Archiviert</span>
-                              <ColorPicker 
-                                currentColor={workshopColors[name] || ''} 
-                                usedColors={Object.values(workshopColors)}
-                                allWorkshopColors={workshopColors}
-                                onColorChange={(color) => updateWorkshopColor(name, color)}
-                              />
-                            </div>
-                            <div className="text-sm text-gray-600 mb-2">Kapazität: <span className="font-semibold text-gray-600">{data.capacity}</span></div>
-                            <div className="text-xs text-gray-500 mb-2">
-                              Archiviert am: {new Date(data.archivedAt).toLocaleDateString('de-DE')}
-                            </div>
-                            {workshopTeachers[name] && (
-                              <div className="text-sm text-gray-600 mb-2">Lehrer: <span className="font-semibold text-gray-600">{workshopTeachers[name]}</span></div>
-                            )}
-                            {workshopRooms[name] && (
-                              <div className="text-sm text-gray-600 mb-2">Raum: <span className="font-semibold text-gray-600">{workshopRooms[name]}</span></div>
-                            )}
-                            {prereqs[name] && prereqs[name].length > 0 && (
-                              <div className="text-sm text-gray-600">
-                                Voraussetzungen: <span className="font-medium text-gray-600">{prereqs[name].join(', ')}</span>
-                              </div>
-                            )}
-                          </div>
-                          <div className="flex flex-wrap gap-2">
-                            <button 
-                              onClick={() => reactivateWorkshop(name)} 
-                              className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200"
-                            >
-                              Reaktivieren
-                            </button>
-                            <button 
-                              onClick={() => permanentlyDeleteArchivedWorkshop(name)} 
-                              className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-red-600 hover:to-red-700 hover:shadow-md transition-all duration-200"
-                            >
-                              Endgültig löschen
-                            </button>
-                          </div>
+                  {[...Object.keys(workshops)].sort((a, b) => a.localeCompare(b, 'de')).map(name => {
+                    const cap = getWorkshopCapacity(workshops[name], name);
+                    const isSelected = activeWorkshopEditor?.type === 'active' && activeWorkshopEditor.name === name;
+                    const dot = workshopColors[name];
+                    return (
+                      <button
+                        key={name}
+                        type="button"
+                        onClick={() => setActiveWorkshopEditor({ type: 'active', name })}
+                        className={`w-full text-left rounded-xl p-3 border transition-all ${
+                          isSelected
+                            ? 'bg-white border-blue-400 ring-2 ring-blue-200 shadow-md'
+                            : 'bg-white/90 border-gray-200/90 hover:border-blue-200 hover:shadow-sm'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          {dot ? (
+                            <span className="w-3 h-3 rounded-full shrink-0 border border-gray-300" style={{ backgroundColor: dot }} />
+                          ) : (
+                            <span className="w-3 h-3 rounded-full shrink-0 bg-gray-200 border border-gray-300" />
+                          )}
+                          <span className="font-semibold text-gray-800 truncate flex-1">{name}</span>
+                          <span className="text-xs text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full shrink-0">{cap} Pl.</span>
                         </div>
-                      ))}
+                      </button>
+                    );
+                  })}
+                  {Object.keys(archivedWorkshops).length > 0 && (
+                    <>
+                      <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide pt-3 px-1">Archiviert</p>
+                      {[...Object.keys(archivedWorkshops)].sort((a, b) => a.localeCompare(b, 'de')).map(name => {
+                        const isSelected = activeWorkshopEditor?.type === 'archived' && activeWorkshopEditor.name === name;
+                        return (
+                          <button
+                            key={`arch-${name}`}
+                            type="button"
+                            onClick={() => setActiveWorkshopEditor({ type: 'archived', name })}
+                            className={`w-full text-left rounded-xl p-3 border transition-all ${
+                              isSelected
+                                ? 'bg-gray-50 border-gray-400 ring-2 ring-gray-200 shadow-md'
+                                : 'bg-gray-50/80 border-gray-200 hover:border-gray-300'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2 min-w-0">
+                              <span className="font-medium text-gray-600 truncate flex-1">{name}</span>
+                              <span className="text-[10px] px-2 py-0.5 bg-gray-400 text-white rounded-full shrink-0">Archiv</span>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                </div>
+              </aside>
+              <main className="xl:col-span-3 flex flex-col min-h-[28rem] xl:min-h-0 bg-gradient-to-br from-green-50/90 to-emerald-50/50">
+                <div className="px-6 py-4 border-b border-green-200/80 shrink-0">
+                  <h3 className="text-lg font-semibold text-green-900">
+                    {activeWorkshopEditor === 'new'
+                      ? 'Neue Werkstatt anlegen'
+                      : activeWorkshopEditor != null
+                        ? 'Werkstatt bearbeiten'
+                        : 'Werkstatt-Editor'}
+                  </h3>
+                  <p className="text-xs text-green-900/70 mt-1">
+                    {activeWorkshopEditor == null
+                      ? 'Links eine Werkstatt wählen oder „Neue Werkstatt“ starten'
+                      : activeWorkshopEditor === 'new'
+                        ? 'Name und Kapazität festlegen'
+                        : activeWorkshopEditor.type === 'archived'
+                          ? 'Archivierte Werkstatt · Reaktivieren oder endgültig löschen'
+                          : 'Kapazität, Bänder, Lehrkraft und Regeln'}
+                  </p>
+                </div>
+                <div className="flex-1 overflow-y-auto px-6 py-5 min-h-0">
+                  {activeWorkshopEditor == null ? (
+                    <div className="flex flex-col items-center justify-center h-full min-h-[16rem] text-center text-gray-500 px-4">
+                      <p className="text-sm max-w-sm">
+                        Wählen Sie links eine Werkstatt, oder klicken Sie auf <strong>+ Neue Werkstatt</strong>.
+                      </p>
                     </div>
-                  </div>
-                )}
-              </div>
-              <div className="bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200">
-                <h3 className="text-xl font-semibold text-green-900 mb-4 border-b border-green-300 pb-3">Neue Werkstatt hinzufügen</h3>
-                <AddWorkshopForm onAdd={(n,c)=>addWorkshop(n,c)} />
-              </div>
+                  ) : activeWorkshopEditor === 'new' ? (
+                    <AddWorkshopForm onAdd={(n, c) => addWorkshop(n, c)} />
+                  ) : activeWorkshopEditor.type === 'active' && !workshops[activeWorkshopEditor.name] ? (
+                    <div className="text-sm text-gray-600">
+                      Diese Werkstatt existiert nicht mehr.{' '}
+                      <button type="button" className="text-blue-700 underline" onClick={() => setActiveWorkshopEditor(null)}>Schließen</button>
+                    </div>
+                  ) : activeWorkshopEditor.type === 'archived' && !archivedWorkshops[activeWorkshopEditor.name] ? (
+                    <div className="text-sm text-gray-600">
+                      Archiv-Eintrag nicht mehr vorhanden.{' '}
+                      <button type="button" className="text-blue-700 underline" onClick={() => setActiveWorkshopEditor(null)}>Schließen</button>
+                    </div>
+                  ) : activeWorkshopEditor.type === 'active' ? (
+                    <WorkshopDetailEditor
+                      key={activeWorkshopEditor.name}
+                      name={activeWorkshopEditor.name}
+                      isArchived={false}
+                      workshop={workshops[activeWorkshopEditor.name]}
+                      workshopColors={workshopColors}
+                      workshopTeachers={workshopTeachers}
+                      workshopRooms={workshopRooms}
+                      prereqs={prereqs}
+                      cannotBeParallel={cannotBeParallel}
+                      allowSelfParallel={allowSelfParallel}
+                      onToggleSelfParallel={(name, allowed) => {
+                        setAllowSelfParallel(prev => {
+                          const next = { ...prev };
+                          if (allowed) next[name] = true;
+                          else delete next[name];
+                          return next;
+                        });
+                      }}
+                      onColorChange={updateWorkshopColor}
+                      onCapacityChange={updateWorkshopCapacity}
+                      onBandToggle={(n, bandId, checked, availableBands) => {
+                        const newBands = checked
+                          ? [...availableBands.filter(b => b !== bandId), bandId]
+                          : availableBands.filter(b => b !== bandId);
+                        updateWorkshopAvailableBands(
+                          n,
+                          newBands.length > 0 ? newBands : [ALL_BAND_IDS.find(id => id !== bandId)]
+                        );
+                      }}
+                      onTeacherChange={updateWorkshopTeacher}
+                      onRoomChange={updateWorkshopRoom}
+                      onEditPrereqs={handleWorkshopClick}
+                      onEditCannotBeParallel={handleCannotBeParallelClick}
+                      onArchiveOrDelete={deleteWorkshop}
+                      onDuplicate={duplicateWorkshop}
+                      onRequestRename={requestRenameWorkshop}
+                      onClose={() => setActiveWorkshopEditor(null)}
+                    />
+                  ) : (
+                    <WorkshopDetailEditor
+                      key={activeWorkshopEditor.name}
+                      name={activeWorkshopEditor.name}
+                      isArchived
+                      archivedMeta={archivedWorkshops[activeWorkshopEditor.name]}
+                      workshopColors={workshopColors}
+                      workshopTeachers={workshopTeachers}
+                      workshopRooms={workshopRooms}
+                      prereqs={prereqs}
+                      cannotBeParallel={cannotBeParallel}
+                      onColorChange={updateWorkshopColor}
+                      onTeacherChange={updateWorkshopTeacher}
+                      onRoomChange={updateWorkshopRoom}
+                      onReactivate={reactivateWorkshop}
+                      onPermanentDelete={permanentlyDeleteArchivedWorkshop}
+                      onRequestRename={requestRenameWorkshop}
+                      onClose={() => setActiveWorkshopEditor(null)}
+                    />
+                  )}
+                </div>
+              </main>
             </div>
           </div>
         </section>
       )}
 
       {tab === 'rules' && (
-        <section className="section">
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-              <div className="bg-gradient-to-br from-purple-50 to-violet-100 rounded-xl p-6 shadow-sm border border-purple-200">
-                <h3 className="text-xl font-semibold text-purple-900 mb-4 border-b border-purple-300 pb-3">Aktuelle Regeln</h3>
-                <div className="space-y-4 max-h-96 overflow-y-auto">
-                  {rules.length===0 && (
-                    <div className="text-gray-500 italic p-4 bg-gray-50 rounded-lg text-center">
-                      Keine Regeln definiert.
+        <section className="section flex flex-col min-h-[calc(100vh-10rem)]">
+          <div className="bg-white rounded-2xl shadow-lg border border-gray-200 flex flex-col flex-1 min-h-[32rem] overflow-hidden">
+            <div className="grid grid-cols-1 xl:grid-cols-5 flex-1 min-h-0">
+              <aside className="xl:col-span-2 flex flex-col min-h-[22rem] xl:min-h-0 border-b xl:border-b-0 xl:border-r border-gray-200 bg-gradient-to-b from-purple-50/80 to-violet-50/40">
+                <div className="px-5 py-4 border-b border-purple-200/80 shrink-0 space-y-3">
+                  <div>
+                    <h3 className="text-lg font-semibold text-purple-900">Aktuelle Regeln</h3>
+                    <p className="text-xs text-purple-800/70 mt-1">{rules.length} Regel{rules.length === 1 ? '' : 'n'}</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveRuleEditor('new')}
+                    className="w-full px-4 py-2.5 rounded-lg font-semibold text-sm bg-purple-600 text-white hover:bg-purple-700 shadow-sm transition-colors"
+                  >
+                    + Neue Regel
+                  </button>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
+                  {rules.length === 0 && (
+                    <div className="text-gray-500 italic p-6 bg-white/70 rounded-xl text-center border border-dashed border-purple-200 text-sm">
+                      Noch keine Regeln. Oben „Neue Regel“ wählen.
                     </div>
                   )}
                   {rules.map(r => {
-                    const ruleType = r.type || "belegung"; // Default to belegung for backward compatibility
+                    const ruleType = r.type || "belegung";
+                    const isActive = activeRuleEditor === r.id;
+                    const badgeClass =
+                      ruleType === 'folgekurs' ? 'bg-green-100 text-green-700'
+                      : ruleType === 'mindestbelegung' ? 'bg-indigo-100 text-indigo-700'
+                      : ruleType === 'freitext' ? 'bg-amber-100 text-amber-800'
+                      : 'bg-purple-100 text-purple-700';
                     return (
-                      <div key={r.id} className="bg-white rounded-lg p-4 shadow-sm border border-gray-200 hover:shadow-md transition-all duration-200">
-                        <div className="flex items-start justify-between mb-2">
-                          <div className="flex-1">
-                            <div className="flex items-center gap-2 mb-1">
-                              <div className="rule-name text-lg font-semibold text-gray-800">{r.name}</div>
-                              <span className={`text-xs px-2 py-1 rounded-full ${ruleType === "belegung" ? "bg-purple-100 text-purple-700" : "bg-green-100 text-green-700"}`}>
-                                {ruleType === "belegung" ? "Belegung" : "Folgekurs"}
-                              </span>
-                            </div>
-                            {ruleType === "belegung" ? (
-                              <div className="rule-description text-sm text-gray-600 mb-2">
-                                <span className="font-medium text-orange-600">{(r.options || []).join(', ')}</span>
-                              </div>
-                            ) : (
-                              <div className="rule-description text-sm text-gray-600 mb-2">
-                                <span className="font-medium text-green-600">
-                                  {r.fromCourse} → {r.toCourse}
-                                  {r.sameBand && <span className="text-xs text-gray-500 ml-2">(gleiches Band)</span>}
-                                </span>
-                              </div>
-                            )}
+                      <div
+                        key={r.id}
+                        className={`flex rounded-xl border overflow-hidden transition-all ${
+                          isActive
+                            ? 'bg-white border-purple-400 ring-2 ring-purple-200 shadow-md'
+                            : 'bg-white/90 border-gray-200/90 hover:border-purple-200 hover:shadow-sm'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => setActiveRuleEditor(r.id)}
+                          className="flex-1 min-w-0 text-left p-3"
+                        >
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-base font-semibold text-gray-800 truncate">{r.name || 'Ohne Name'}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${badgeClass}`}>
+                              {getRuleTypeLabel(ruleType)}
+                            </span>
                           </div>
-                          <div className="group relative inline-block ml-2">
-                            <svg className="w-5 h-5 text-blue-500 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-                            </svg>
-                            <div className="absolute right-0 bottom-full mb-2 transform w-64 bg-gray-900 text-white text-xs rounded-lg py-2 px-3 opacity-0 group-hover:opacity-100 transition-opacity duration-200 pointer-events-none z-50">
-                              <strong>Was bedeutet diese Regel?</strong><br/>
-                              {ruleType === "belegung" ? (
-                                <>Der Schüler muss <strong>alle</strong> aufgelisteten Kurse irgendwann einmal belegt haben. Die Regel ist erfüllt, wenn der Schüler in seiner Historie alle Kurse ({(r.options || []).join(', ')}) mindestens einmal zugeordnet bekommen hat.</>
-                              ) : (
-                                <>Wenn ein Schüler den Kurs <strong>{r.fromCourse}</strong> in einem Trimester belegt, muss er im nächsten Trimester automatisch den Kurs <strong>{r.toCourse}</strong> belegen{r.fromCourse === r.toCourse ? " (derselbe Kurs)" : ""}.{r.sameBand ? " Der Folgekurs muss im selben Band (Erstes oder Zweites Band) wie der Ausgangskurs sein." : ""}</>
-                              )}
-                            </div>
-                          </div>
-                        </div>
-                        <div className="rule-controls">
-                          <button 
-                            onClick={()=>deleteRule(r.id)} 
-                            className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white text-sm font-medium rounded-lg shadow-sm hover:from-red-600 hover:to-red-700 hover:shadow-md transition-all duration-200"
-                          >
-                            Regel löschen
-                          </button>
-                        </div>
+                          <p className="text-xs text-slate-600 mt-1 truncate">{formatRuleZeitraumLabel(r)}</p>
+                        </button>
+                        <button
+                          type="button"
+                          title="Regel duplizieren (Kopie zum Bearbeiten)"
+                          onClick={() => duplicateRule(r.id)}
+                          className="shrink-0 px-3 border-l border-gray-200/80 text-xs font-semibold text-purple-700 hover:bg-purple-50 transition-colors"
+                        >
+                          Duplizieren
+                        </button>
                       </div>
                     );
                   })}
                 </div>
-              </div>
-              <div className="bg-gradient-to-br from-orange-50 to-amber-100 rounded-xl p-6 shadow-sm border border-orange-200">
-                <h3 className="text-xl font-semibold text-orange-900 mb-4 border-b border-orange-300 pb-3">Neue Regel erstellen</h3>
-                <CreateRuleForm workshops={Object.keys(workshops)} onAdd={addRule} />
-              </div>
-            </div>
-          </div>
-        </section>
-      )}
-
-      {tab === 'data' && (
-        <section className="section">
-          <div className="bg-white rounded-2xl shadow-lg p-6">
-            <h2 className="text-2xl font-bold text-gray-800 mb-6 border-b border-gray-300 pb-3">Datenverwaltung</h2>
-            
-            <div className="space-y-6">
-              {/* Export Section */}
-              <div className="bg-gradient-to-br from-green-50 to-emerald-100 rounded-xl p-6 shadow-sm border border-green-200">
-                <h3 className="text-xl font-semibold text-green-900 mb-4 border-b border-green-300 pb-3">Daten exportieren</h3>
-                <p className="text-sm text-green-700 mb-4">
-                  Exportieren Sie alle Daten als ZIP-Datei. Die Datei wird mit dem aktuellen Datum und der Uhrzeit benannt.
-                </p>
-                <button
-                  onClick={handleExportAllData}
-                  className="px-6 py-3 bg-gradient-to-r from-green-500 to-green-600 text-white font-semibold rounded-lg shadow-sm hover:from-green-600 hover:to-green-700 hover:shadow-md transition-all duration-200 flex items-center justify-center gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                  </svg>
-                  Alle Daten als ZIP exportieren
-                </button>
-              </div>
-
-              {/* Import Section */}
-              <div className="bg-gradient-to-br from-blue-50 to-cyan-100 rounded-xl p-6 shadow-sm border border-blue-200">
-                <h3 className="text-xl font-semibold text-blue-900 mb-4 border-b border-blue-300 pb-3">Daten importieren</h3>
-                <p className="text-sm text-blue-700 mb-4">
-                  Importieren Sie eine zuvor exportierte ZIP-Datei. Alle aktuellen Daten werden überschrieben.
-                </p>
-                <label className="block">
-                  <input
-                    type="file"
-                    accept=".zip"
-                    onChange={handleImportData}
-                    className="hidden"
-                    id="import-file-input"
-                  />
-                  <span className="inline-block px-6 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200 cursor-pointer flex items-center justify-center gap-2">
-                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-                    </svg>
-                    ZIP-Datei auswählen und importieren
-                  </span>
-                </label>
-              </div>
-
-              {/* Clear Data Section */}
-              <div className="bg-gradient-to-br from-red-50 to-rose-100 rounded-xl p-6 shadow-sm border border-red-200">
-                <h3 className="text-xl font-semibold text-red-900 mb-4 border-b border-red-300 pb-3">Alle Daten löschen</h3>
-                <p className="text-sm text-red-700 mb-4">
-                  <strong>Warnung:</strong> Diese Aktion löscht alle Daten unwiderruflich. Stellen Sie sicher, dass Sie zuvor alle Daten exportiert haben.
-                </p>
-                <button
-                  onClick={handleClearAllData}
-                  className="px-6 py-3 bg-gradient-to-r from-red-500 to-red-600 text-white font-semibold rounded-lg shadow-sm hover:from-red-600 hover:to-red-700 hover:shadow-md transition-all duration-200 flex items-center justify-center gap-2"
-                >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                  </svg>
-                  Alle Daten löschen
-                </button>
-              </div>
-
-              {/* Data Summary */}
-              <div className="bg-gradient-to-br from-gray-50 to-slate-100 rounded-xl p-6 shadow-sm border border-gray-200">
-                <h3 className="text-xl font-semibold text-gray-900 mb-4 border-b border-gray-300 pb-3">Datenübersicht</h3>
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Schüler</div>
-                    <div className="text-2xl font-bold text-gray-800">{students.length}</div>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Werkstätten</div>
-                    <div className="text-2xl font-bold text-gray-800">{Object.keys(workshops).length}</div>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Gespeicherte Zuweisungen</div>
-                    <div className="text-2xl font-bold text-gray-800">{Object.keys(confirmedAssignments).length}</div>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Regeln</div>
-                    <div className="text-2xl font-bold text-gray-800">{rules.length}</div>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Vorherige Zuweisungen</div>
-                    <div className="text-2xl font-bold text-gray-800">{Object.keys(prevAssignments).length}</div>
-                  </div>
-                  <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                    <div className="text-sm text-gray-600 mb-1">Voraussetzungen</div>
-                    <div className="text-2xl font-bold text-gray-800">{Object.keys(prereqs).length}</div>
-                  </div>
+              </aside>
+              <main className="xl:col-span-3 flex flex-col min-h-[28rem] xl:min-h-0 bg-gradient-to-br from-orange-50/90 to-amber-50/50">
+                <div className="px-6 py-4 border-b border-orange-200/80 shrink-0">
+                  <h3 className="text-lg font-semibold text-orange-900">
+                    {activeRuleEditor === 'new'
+                      ? 'Neue Regel erstellen'
+                      : activeRuleEditor != null
+                        ? 'Regel bearbeiten'
+                        : 'Regel-Editor'}
+                  </h3>
+                  <p className="text-xs text-orange-900/70 mt-1">
+                    {activeRuleEditor == null
+                      ? 'Links eine Regel wählen oder „Neue Regel“ starten'
+                      : activeRuleEditor === 'new'
+                        ? 'Typ, Zeitraum und Kurse festlegen'
+                        : 'Typ ist fest · Zeitraum und Inhalte anpassen'}
+                  </p>
                 </div>
-              </div>
+                <div className="flex-1 overflow-y-auto px-6 py-5 min-h-0">
+                  {activeRuleEditor == null ? (
+                    <div className="flex flex-col items-center justify-center h-full min-h-[16rem] text-center text-gray-500 px-4">
+                      <p className="text-sm max-w-sm">
+                        Wählen Sie links eine Belegungs-Regel zum Bearbeiten, oder klicken Sie auf <strong>+ Neue Regel</strong>.
+                      </p>
+                    </div>
+                  ) : activeRuleEditor !== 'new' && !rules.some(r => r.id === activeRuleEditor) ? (
+                    <div className="text-sm text-gray-600">
+                      Diese Regel existiert nicht mehr.{' '}
+                      <button type="button" className="text-purple-700 underline" onClick={() => setActiveRuleEditor(null)}>
+                        Schließen
+                      </button>
+                    </div>
+                  ) : (
+                    <RuleEditorForm
+                      key={activeRuleEditor === 'new' ? 'create' : String(activeRuleEditor)}
+                      mode={activeRuleEditor === 'new' ? 'create' : 'edit'}
+                      initialRule={
+                        activeRuleEditor === 'new'
+                          ? null
+                          : rules.find(r => r.id === activeRuleEditor)
+                      }
+                      workshops={Object.keys(workshops)}
+                      klassenStufenPool={klassenStufenPool}
+                      onAddKlassenStufe={addKlassenStufeToPool}
+                      onSave={(payload) => {
+                        if (activeRuleEditor === 'new') {
+                          const id = addRule(payload);
+                          setActiveRuleEditor(id);
+                        } else {
+                          updateRule(activeRuleEditor, payload);
+                        }
+                      }}
+                      onCancel={() => setActiveRuleEditor(null)}
+                      onDelete={
+                        activeRuleEditor !== 'new'
+                          ? () => {
+                              if (window.confirm('Diese Regel wirklich löschen?')) {
+                                deleteRule(activeRuleEditor);
+                              }
+                            }
+                          : undefined
+                      }
+                      onDuplicate={
+                        activeRuleEditor !== 'new'
+                          ? () => duplicateRule(activeRuleEditor)
+                          : undefined
+                      }
+                    />
+                  )}
+                </div>
+              </main>
             </div>
           </div>
         </section>
       )}
+
+      <Dialog open={!!workshopRenameDialog} onOpenChange={(open) => { if (!open) setWorkshopRenameDialog(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle>Werkstatt umbenennen</DialogTitle>
+          </DialogHeader>
+          {workshopRenameDialog && (
+            <div className="space-y-4 py-2 text-sm text-gray-700">
+              <p>
+                <strong>„{workshopRenameDialog.oldName}“</strong> wird in{' '}
+                <strong>„{workshopRenameDialog.newName}“</strong> umbenannt.
+              </p>
+              <div className="rounded-lg border border-amber-300 bg-amber-50 p-4 text-amber-950">
+                <p className="font-semibold">Achtung: Historische Daten werden angepasst</p>
+                <p className="mt-2">
+                  Der neue Name ersetzt den alten überall — in Zuordnungen aller Trimester, Wahl-Uploads,
+                  Regeln, Voraussetzungen, Trimester-Plänen und Archiv-Einträgen. Dies kann nicht rückgängig
+                  gemacht werden.
+                </p>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setWorkshopRenameDialog(null)}
+                  className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-lg"
+                >
+                  Abbrechen
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmRenameWorkshop}
+                  className="px-4 py-2 bg-blue-600 text-white font-semibold rounded-lg hover:bg-blue-700"
+                >
+                  Umbenennen bestätigen
+                </button>
+              </div>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Prerequisites Dialog */}
       {showPrereqDialog && (
@@ -6107,7 +7725,25 @@ export default function WerkstattVerwaltungApp() {
         </div>
       )}
 
-      <footer className="app-footer">2025 Jasper Wilfling</footer>
+            {/* Column Mapping & Preview Modal for Student Votes Upload */}
+      <ColumnMappingModal
+        isOpen={columnMappingModal.isOpen}
+        onClose={() => setColumnMappingModal((prev) => ({ ...prev, isOpen: false }))}
+        fileName={columnMappingModal.fileName}
+        targetBand={columnMappingModal.targetBand}
+        onTargetBandChange={(newBand) => setColumnMappingModal((prev) => ({ ...prev, targetBand: newBand }))}
+        activeBandIds={activeBandIds}
+        getBandLabel={getBandLabel}
+        headers={columnMappingModal.headers}
+        previewRows={columnMappingModal.previewRows}
+        totalRows={columnMappingModal.totalRows}
+        mappings={columnMappingModal.mappings}
+        onMappingChange={handleColumnMappingChange}
+        onResetMappings={handleResetColumnMappings}
+        onConfirm={handleConfirmColumnMapping}
+      />
+
+      <footer className="app-footer">2026 Jasper Wilfling</footer>
 
     </div>
   );
@@ -6116,6 +7752,258 @@ export default function WerkstattVerwaltungApp() {
 // ----------------------------
 // Subcomponents
 // ----------------------------
+function WorkshopDetailEditor({
+  name,
+  isArchived,
+  workshop,
+  archivedMeta,
+  workshopColors,
+  workshopTeachers,
+  workshopRooms,
+  prereqs,
+  cannotBeParallel,
+  allowSelfParallel = {},
+  onToggleSelfParallel,
+  onColorChange,
+  onCapacityChange,
+  onBandToggle,
+  onTeacherChange,
+  onRoomChange,
+  onEditPrereqs,
+  onEditCannotBeParallel,
+  onArchiveOrDelete,
+  onDuplicate,
+  onRequestRename,
+  onReactivate,
+  onPermanentDelete,
+  onClose,
+}) {
+  const [nameDraft, setNameDraft] = React.useState(name);
+  React.useEffect(() => {
+    setNameDraft(name);
+  }, [name]);
+
+  const cap = isArchived
+    ? archivedMeta?.capacity ?? 0
+    : getWorkshopCapacity(workshop, name);
+  const availableBands = isArchived
+    ? archivedMeta?.availableBands || ALL_BAND_IDS
+    : getWorkshopAvailableBands(workshop, name);
+
+  const trimmedDraft = nameDraft.trim();
+  const canSubmitRename = trimmedDraft.length > 0 && trimmedDraft !== name;
+
+  return (
+    <div className="space-y-5 max-w-3xl">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex-1 min-w-[12rem]">
+          <label className="block text-sm font-medium text-gray-700 mb-1">Name der Werkstatt</label>
+          <div className="flex flex-wrap gap-2">
+            <input
+              type="text"
+              value={nameDraft}
+              onChange={e => setNameDraft(e.target.value)}
+              className="flex-1 min-w-[10rem] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-base font-semibold text-gray-900"
+            />
+            {onRequestRename && (
+              <button
+                type="button"
+                disabled={!canSubmitRename}
+                onClick={() => onRequestRename(name, trimmedDraft)}
+                className="px-3 py-2 text-sm font-semibold rounded-lg border border-blue-200 text-blue-800 bg-blue-50 hover:bg-blue-100 disabled:opacity-40 disabled:cursor-not-allowed"
+              >
+                Name ändern…
+              </button>
+            )}
+          </div>
+          {isArchived && archivedMeta?.archivedAt && (
+            <p className="text-xs text-gray-500 mt-1">
+              Archiviert am {new Date(archivedMeta.archivedAt).toLocaleDateString('de-DE')}
+            </p>
+          )}
+        </div>
+        <ColorPicker
+          currentColor={workshopColors[name] || ''}
+          usedColors={Object.values(workshopColors)}
+          allWorkshopColors={workshopColors}
+          onColorChange={color => onColorChange(name, color)}
+        />
+      </div>
+
+      {!isArchived && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Kapazität</label>
+          <input
+            type="number"
+            min={0}
+            value={cap}
+            onChange={e => onCapacityChange(name, e.target.value)}
+            className="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm"
+          />
+        </div>
+      )}
+
+      {isArchived && (
+        <p className="text-sm text-gray-600">
+          Kapazität (Archiv): <span className="font-semibold">{cap}</span>
+        </p>
+      )}
+
+      {!isArchived && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Verfügbar in Bändern</label>
+          <div className="flex flex-wrap gap-3 p-3 bg-white rounded-lg border border-gray-200">
+            {BANDS.map(band => (
+              <label key={band.id} className="flex items-center gap-2 cursor-pointer text-sm">
+                <input
+                  type="checkbox"
+                  checked={availableBands.includes(band.id)}
+                  onChange={e => onBandToggle(name, band.id, e.target.checked, availableBands)}
+                  className="w-4 h-4 text-blue-600"
+                />
+                <span>{band.label}</span>
+              </label>
+            ))}
+          </div>
+        </div>
+      )}
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Lehrkraft</label>
+        <input
+          type="text"
+          value={workshopTeachers[name] || ''}
+          onChange={e => onTeacherChange(name, e.target.value)}
+          placeholder="Name der Lehrkraft"
+          disabled={isArchived}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm disabled:bg-gray-100"
+        />
+      </div>
+
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Raum</label>
+        <input
+          type="text"
+          value={workshopRooms[name] || ''}
+          onChange={e => onRoomChange(name, e.target.value)}
+          placeholder="Raumnummer"
+          disabled={isArchived}
+          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 text-sm disabled:bg-gray-100"
+        />
+      </div>
+
+      {(prereqs[name]?.length > 0 || !isArchived) && (
+        <div className="text-sm text-gray-700 p-3 bg-white rounded-lg border border-gray-200">
+          <span className="font-medium">Voraussetzungen:</span>{' '}
+          {prereqs[name]?.length ? (
+            <span className="text-orange-700">{prereqs[name].join(', ')}</span>
+          ) : (
+            <span className="text-gray-400 italic">Keine</span>
+          )}
+          {!isArchived && (
+            <button
+              type="button"
+              onClick={() => onEditPrereqs(name)}
+              className="block mt-2 text-sm font-medium text-green-700 hover:text-green-800"
+            >
+              Voraussetzungen bearbeiten
+            </button>
+          )}
+        </div>
+      )}
+
+      {!isArchived && (
+        <label className="flex items-start gap-3 text-sm text-gray-800 p-3 bg-white rounded-lg border border-gray-200 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={allowSelfParallel[name] !== true}
+            onChange={event => onToggleSelfParallel?.(name, !event.target.checked)}
+            className="mt-0.5 w-4 h-4 text-orange-600"
+          />
+          <span>
+            <span className="font-medium">Nicht parallel zu sich selbst in einem anderen Band</span>
+            <span className="block text-xs text-gray-500 mt-0.5">
+              Standardmäßig aktiv. Ein Schüler soll diesen Kurs nicht gleichzeitig in einem zweiten Band belegen.
+            </span>
+          </span>
+        </label>
+      )}
+
+      {(cannotBeParallel[name]?.length > 0 || !isArchived) && (
+        <div className="text-sm text-gray-700 p-3 bg-white rounded-lg border border-gray-200">
+          <span className="font-medium">Nicht parallel mit:</span>{' '}
+          {cannotBeParallel[name]?.length ? (
+            <span className="text-red-700">{cannotBeParallel[name].join(', ')}</span>
+          ) : (
+            <span className="text-gray-400 italic">Keine</span>
+          )}
+          {!isArchived && (
+            <button
+              type="button"
+              onClick={() => onEditCannotBeParallel(name)}
+              className="block mt-2 text-sm font-medium text-orange-700 hover:text-orange-800"
+            >
+              Parallel-Regeln bearbeiten
+            </button>
+          )}
+        </div>
+      )}
+
+      <div className="flex flex-col sm:flex-row gap-3 pt-2">
+        {onClose && (
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex-1 px-4 py-2.5 rounded-lg border border-gray-300 bg-white text-gray-700 font-medium hover:bg-gray-50"
+          >
+            Schließen
+          </button>
+        )}
+        {!isArchived && (onDuplicate || onArchiveOrDelete) && (
+          <div className="flex flex-1 flex-col sm:flex-row gap-2 min-w-0">
+            {onDuplicate && (
+              <button
+                type="button"
+                onClick={() => onDuplicate(name)}
+                className="flex-1 px-4 py-2.5 rounded-lg bg-blue-50 text-blue-800 font-medium border border-blue-200 hover:bg-blue-100"
+              >
+                Duplizieren
+              </button>
+            )}
+            {onArchiveOrDelete && (
+              <button
+                type="button"
+                onClick={() => onArchiveOrDelete(name)}
+                className="flex-1 px-4 py-2.5 rounded-lg bg-red-50 text-red-700 font-medium border border-red-200 hover:bg-red-100"
+              >
+                Löschen / Archivieren
+              </button>
+            )}
+          </div>
+        )}
+        {isArchived && onReactivate && (
+          <button
+            type="button"
+            onClick={() => onReactivate(name)}
+            className="flex-1 px-4 py-2.5 rounded-lg bg-green-600 text-white font-medium hover:bg-green-700"
+          >
+            Reaktivieren
+          </button>
+        )}
+        {isArchived && onPermanentDelete && (
+          <button
+            type="button"
+            onClick={() => onPermanentDelete(name)}
+            className="flex-1 px-4 py-2.5 rounded-lg bg-red-600 text-white font-medium hover:bg-red-700"
+          >
+            Endgültig löschen
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function AddWorkshopForm({ onAdd }) {
   const [name, setName] = useState("");
   const [cap, setCap] = useState(16);
@@ -6150,16 +8038,254 @@ function AddWorkshopForm({ onAdd }) {
   );
 }
 
-function CreateRuleForm({ workshops, onAdd }) {
-  const [ruleType, setRuleType] = useState("belegung"); // "belegung" or "folgekurs"
-  const [name, setName] = useState("");
-  const [selected, setSelected] = useState([]); // for belegung rules
-  const [fromCourse, setFromCourse] = useState(""); // for folgekurs rules
-  const [toCourse, setToCourse] = useState(""); // for folgekurs rules
-  const [sameBand, setSameBand] = useState(false); // for folgekurs rules
+function KlassenStufenRangeSlider({ pool, rangeFrom, rangeTo, onChange, onAddStufe }) {
+  const cellRefs = useRef([]);
+  const dragEdgeRef = useRef(null);
+
+  const fromIdx = Math.max(0, pool.indexOf(rangeFrom));
+  const toIdx = Math.max(fromIdx, pool.indexOf(rangeTo));
+
+  const clampedFrom = pool[fromIdx];
+  const clampedTo = pool[toIdx];
+
+  const poolIndexFromClientX = useCallback((clientX) => {
+    for (let i = 0; i < pool.length; i++) {
+      const el = cellRefs.current[i];
+      if (!el) continue;
+      const rect = el.getBoundingClientRect();
+      const mid = rect.left + rect.width / 2;
+      if (clientX < mid) return i;
+    }
+    return pool.length - 1;
+  }, [pool]);
+
+  useEffect(() => {
+    function onPointerMove(e) {
+      const edge = dragEdgeRef.current;
+      if (!edge) return;
+      const idx = poolIndexFromClientX(e.clientX);
+      if (edge === 'left') {
+        const newFrom = pool[Math.min(idx, toIdx)];
+        const newTo = pool[toIdx];
+        onChange(newFrom, newTo);
+      } else {
+        const newFrom = pool[fromIdx];
+        const newTo = pool[Math.max(idx, fromIdx)];
+        onChange(newFrom, newTo);
+      }
+    }
+    function onPointerUp() {
+      dragEdgeRef.current = null;
+    }
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+    };
+  }, [pool, fromIdx, toIdx, onChange, poolIndexFromClientX]);
+
+  function startDrag(edge, e) {
+    e.preventDefault();
+    dragEdgeRef.current = edge;
+  }
+
+  return (
+    <div className="rounded-xl border border-teal-200 bg-teal-50/60 p-4">
+      <label className="block text-sm font-medium text-teal-900 mb-1">Zeitraum (Jahrgangsstufen)</label>
+      <p className="text-xs text-teal-800/80 mb-3">
+        Regel muss in diesem Stufen-Bereich erfüllt sein (Klasse „5a“ → Stufe&nbsp;5). An den grünen Rändern ziehen, um den Zeitraum zu verkleinern oder zu vergrößern. Mit „+“ höhere Stufen einblenden.
+      </p>
+      <div className="flex flex-wrap items-stretch gap-0.5 select-none touch-none">
+        {pool.map((stufe, i) => {
+          const inRange = i >= fromIdx && i <= toIdx;
+          const isLeftEdge = i === fromIdx;
+          const isRightEdge = i === toIdx;
+          return (
+            <div
+              key={stufe}
+              ref={el => { cellRefs.current[i] = el; }}
+              className="relative flex items-stretch"
+            >
+              {isLeftEdge && (
+                <button
+                  type="button"
+                  aria-label="Untergrenze verschieben"
+                  onPointerDown={e => startDrag('left', e)}
+                  className="w-2 shrink-0 cursor-ew-resize rounded-l-md bg-teal-800 hover:bg-teal-900 border border-teal-900"
+                />
+              )}
+              <div
+                className={`min-w-[2.75rem] px-2 py-2.5 text-center text-sm font-semibold border-y border-teal-300 ${
+                  inRange
+                    ? 'bg-teal-600 text-white border-teal-600'
+                    : 'bg-white text-gray-700 border-gray-200'
+                } ${!isLeftEdge && i === fromIdx + 0 ? '' : ''} ${isLeftEdge ? 'border-l-0' : 'border-l'} ${isRightEdge ? 'border-r-0' : 'border-r'}`}
+              >
+                {stufe}
+              </div>
+              {isRightEdge && (
+                <button
+                  type="button"
+                  aria-label="Obergrenze verschieben"
+                  onPointerDown={e => startDrag('right', e)}
+                  className="w-2 shrink-0 cursor-ew-resize rounded-r-md bg-teal-800 hover:bg-teal-900 border border-teal-900"
+                />
+              )}
+            </div>
+          );
+        })}
+        <button
+          type="button"
+          onClick={onAddStufe}
+          title="Nächste Stufe zur Liste hinzufügen"
+          className="ml-2 min-w-[2.5rem] h-[2.75rem] self-center flex items-center justify-center rounded-lg border-2 border-dashed border-teal-500 text-teal-700 font-bold text-lg hover:bg-teal-100/80"
+        >
+          +
+        </button>
+      </div>
+      <p className="text-xs text-teal-900 mt-2 font-medium">
+        Ausgewählt: Stufe {clampedFrom}–{clampedTo}
+      </p>
+    </div>
+  );
+}
+
+function EinschulungsjahrgangRuleFields({ yearFrom, yearTo, onChangeFrom, onChangeTo }) {
+  const years = useMemo(() => getEinschulungsjahrYearOptions(), []);
+  return (
+    <div className="rounded-xl border border-indigo-200 bg-indigo-50/60 p-4">
+      <label className="block text-sm font-medium text-indigo-900 mb-1">Einschulungsjahrgang</label>
+      <p className="text-xs text-indigo-900/70 mb-3">
+        Gilt für Schüler, deren hinterlegtes Einschulungsjahr im gewählten Bereich liegt (z.&nbsp;B. ab 2024 bis 2026).
+      </p>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Frühestens (ab Einschulung)</label>
+          <select
+            value={yearFrom ?? ''}
+            onChange={e => onChangeFrom(e.target.value === '' ? null : Number(e.target.value))}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+          >
+            <option value="">Ohne Untergrenze</option>
+            {years.map(y => (
+              <option key={`ef-${y}`} value={y}>{y}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-gray-700 mb-1">Spätestens (bis Einschulung)</label>
+          <select
+            value={yearTo ?? ''}
+            onChange={e => onChangeTo(e.target.value === '' ? null : Number(e.target.value))}
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white"
+          >
+            <option value="">Ohne Obergrenze</option>
+            {years.map(y => (
+              <option key={`et-${y}`} value={y}>{y}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function getInitialRuleFormState(initialRule, klassenStufenPool) {
+  const range = initialRule ? getRuleKlassenStufenRange(initialRule) : null;
+  return {
+    ruleType: initialRule?.type || 'belegung',
+    name: initialRule?.name || '',
+    selected: [...(initialRule?.options || [])],
+    rangeFrom: range?.from ?? klassenStufenPool[0] ?? 5,
+    rangeTo: range?.to ?? klassenStufenPool[klassenStufenPool.length - 1] ?? 10,
+    einschulFrom: initialRule?.einschulungsjahrFrom ?? null,
+    einschulTo: initialRule?.einschulungsjahrTo ?? null,
+    minCount: initialRule?.minCount ?? 3,
+    freeTextDescription: initialRule?.description || '',
+    fromCourse: initialRule?.fromCourse || '',
+    toCourse: initialRule?.toCourse || '',
+    sameBand: !!initialRule?.sameBand,
+  };
+}
+
+function RuleEditorForm({
+  mode,
+  initialRule,
+  workshops,
+  klassenStufenPool,
+  onAddKlassenStufe,
+  onSave,
+  onCancel,
+  onDelete,
+  onDuplicate,
+}) {
+  const isEdit = mode === 'edit';
+  const sameBandInputId = useId();
+  const init = getInitialRuleFormState(initialRule, klassenStufenPool);
+
+  const [ruleType, setRuleType] = useState(init.ruleType);
+  const [name, setName] = useState(init.name);
+  const [selected, setSelected] = useState(init.selected);
+  const [rangeFrom, setRangeFrom] = useState(init.rangeFrom);
+  const [rangeTo, setRangeTo] = useState(init.rangeTo);
+  const [einschulFrom, setEinschulFrom] = useState(init.einschulFrom);
+  const [einschulTo, setEinschulTo] = useState(init.einschulTo);
+  const [minCount, setMinCount] = useState(init.minCount);
+  const [freeTextDescription, setFreeTextDescription] = useState(init.freeTextDescription);
+  const [fromCourse, setFromCourse] = useState(init.fromCourse);
+  const [toCourse, setToCourse] = useState(init.toCourse);
+  const [sameBand, setSameBand] = useState(init.sameBand);
+
+  const sortedWorkshops = useMemo(
+    () => [...workshops].sort((a, b) => a.localeCompare(b, 'de')),
+    [workshops]
+  );
+
+  useEffect(() => {
+    if (klassenStufenPool.length === 0) return;
+    setRangeFrom(prev => (klassenStufenPool.includes(prev) ? prev : klassenStufenPool[0]));
+    setRangeTo(prev => (klassenStufenPool.includes(prev) ? prev : klassenStufenPool[klassenStufenPool.length - 1]));
+  }, [klassenStufenPool]);
 
   function toggleOpt(opt) {
     setSelected(prev => prev.includes(opt) ? prev.filter(x=>x!==opt) : [...prev, opt]);
+  }
+
+  function handleRangeChange(from, to) {
+    setRangeFrom(from);
+    setRangeTo(to);
+  }
+
+  function zeitraumMeta() {
+    const from = Math.min(rangeFrom, rangeTo);
+    const to = Math.max(rangeFrom, rangeTo);
+    return { klassenStufenRange: { from, to } };
+  }
+
+  function cohortMeta() {
+    return {
+      einschulungsjahrFrom: einschulFrom,
+      einschulungsjahrTo: einschulTo,
+    };
+  }
+
+  function buildPayload() {
+    const base = { type: ruleType, name, ...zeitraumMeta(), ...cohortMeta() };
+    if (ruleType === 'belegung') {
+      return { ...base, options: selected };
+    }
+    if (ruleType === 'mindestbelegung') {
+      const required = Math.max(1, parseInt(String(minCount), 10) || 1);
+      return { ...base, options: selected, minCount: required };
+    }
+    if (ruleType === 'freitext') {
+      return { ...base, description: freeTextDescription.trim() };
+    }
+    if (ruleType === 'folgekurs') {
+      return { ...base, fromCourse, toCourse, sameBand };
+    }
+    return base;
   }
 
   function submit() {
@@ -6167,38 +8293,77 @@ function CreateRuleForm({ workshops, onAdd }) {
       alert('Bitte einen Regel-Namen eingeben.');
       return;
     }
+    if (einschulFrom != null && einschulTo != null && einschulFrom > einschulTo) {
+      alert('Einschulungsjahr „frühestens“ darf nicht nach „spätestens“ liegen.');
+      return;
+    }
     
     if (ruleType === "belegung") {
       if (selected.length === 0) {
-        alert('Bitte mindestens eine Option wählen.');
+        alert('Bitte mindestens einen Kurs wählen.');
         return;
       }
-      onAdd({ type: "belegung", name, options: selected });
-      setName(""); setSelected([]);
+    } else if (ruleType === "mindestbelegung") {
+      if (selected.length === 0) {
+        alert('Bitte mindestens einen Kurs für die Auswahl wählen.');
+        return;
+      }
+      const required = Math.max(1, parseInt(String(minCount), 10) || 1);
+      if (required > selected.length) {
+        alert(`Die Mindestanzahl (${required}) kann nicht größer sein als die Anzahl gewählter Kurse (${selected.length}).`);
+        return;
+      }
+    } else if (ruleType === "freitext") {
+      if (!freeTextDescription.trim()) {
+        alert('Bitte einen Regeltext eingeben.');
+        return;
+      }
     } else if (ruleType === "folgekurs") {
       if (!fromCourse || !toCourse) {
         alert('Bitte sowohl Ausgangskurs als auch Folgekurs auswählen.');
         return;
       }
-      // Allow fromCourse === toCourse (student must take the same course again)
-      onAdd({ type: "folgekurs", name, fromCourse, toCourse, sameBand });
-      setName(""); setFromCourse(""); setToCourse(""); setSameBand(false);
     }
+    onSave(buildPayload());
   }
 
+  const showWorkshopPicker = ruleType === 'belegung' || ruleType === 'mindestbelegung';
+
   return (
-    <div className="space-y-4">
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-2">Regel-Typ</label>
-        <select 
-          value={ruleType} 
-          onChange={e=>setRuleType(e.target.value)}
-          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
-        >
-          <option value="belegung">Belegungsregel</option>
-          <option value="folgekurs">Folgekurs-Regel</option>
-        </select>
-      </div>
+    <div className="space-y-5 max-w-3xl">
+      <KlassenStufenRangeSlider
+        pool={klassenStufenPool}
+        rangeFrom={rangeFrom}
+        rangeTo={rangeTo}
+        onChange={handleRangeChange}
+        onAddStufe={onAddKlassenStufe}
+      />
+      <EinschulungsjahrgangRuleFields
+        yearFrom={einschulFrom}
+        yearTo={einschulTo}
+        onChangeFrom={setEinschulFrom}
+        onChangeTo={setEinschulTo}
+      />
+      {isEdit ? (
+        <div className="px-4 py-3 rounded-lg border border-gray-200 bg-white/80">
+          <span className="text-xs font-medium text-gray-500 uppercase tracking-wide">Regel-Typ</span>
+          <p className="text-sm font-semibold text-gray-900 mt-0.5">{getRuleTypeLabel(ruleType)}</p>
+        </div>
+      ) : (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Regel-Typ</label>
+          <select 
+            value={ruleType} 
+            onChange={e => { setRuleType(e.target.value); setSelected([]); }}
+            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
+          >
+            <option value="belegung">Alle ausgewählten Kurse (jeder mindestens 1×)</option>
+            <option value="mindestbelegung">Mindestanzahl aus Kurs-Pool</option>
+            <option value="folgekurs">Folgekurs-Regel</option>
+            <option value="freitext">Freitext / manuelle Checkliste</option>
+          </select>
+        </div>
+      )}
       
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">Regel-Name</label>
@@ -6210,12 +8375,53 @@ function CreateRuleForm({ workshops, onAdd }) {
         />
       </div>
 
-      {ruleType === "belegung" ? (
+      {ruleType === "mindestbelegung" && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Mindestanzahl verschiedener Kurse</label>
+          <input
+            type="number"
+            min={1}
+            max={99}
+            value={minCount}
+            onChange={e => setMinCount(e.target.value)}
+            className="w-32 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 text-sm"
+          />
+          <p className="text-xs text-gray-500 mt-1">z. B. 3 Kunst-Kurse aus dem unten gewählten Pool.</p>
+        </div>
+      )}
+
+      {ruleType === "freitext" && (
+        <div>
+          <label className="block text-sm font-medium text-gray-700 mb-2">Regeltext (erscheint bei jedem Schüler)</label>
+          <textarea
+            value={freeTextDescription}
+            onChange={e => setFreeTextDescription(e.target.value)}
+            rows={4}
+            placeholder="z. B. Elterngespräch zur Werkstattwahl geführt …"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 text-sm resize-y"
+          />
+          <p className="text-xs text-gray-500 mt-1">In der Schülerübersicht kann diese Regel pro Schüler manuell abgehakt werden.</p>
+        </div>
+      )}
+
+      {showWorkshopPicker ? (
         <>
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-3">Wähle mögliche Kurse (mindestens eine):</label>
-            <div className="grid grid-cols-2 gap-2 max-h-48 overflow-y-auto">
-              {workshops.map(w => (
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
+              <label className="text-sm font-medium text-gray-700">
+                Kurse für diese Regel ({selected.length}/{sortedWorkshops.length})
+              </label>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setSelected([...sortedWorkshops])} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">
+                  Alle auswählen
+                </button>
+                <button type="button" onClick={() => setSelected([])} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">
+                  Auswahl leeren
+                </button>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[min(20rem,calc(100vh-22rem))] overflow-y-auto pr-1">
+              {sortedWorkshops.map(w => (
                 <div key={w} className="flex items-center p-2 bg-white rounded-lg border border-gray-200 hover:bg-gray-50 transition-all duration-200">
                   <input 
                     type="checkbox" 
@@ -6228,18 +8434,18 @@ function CreateRuleForm({ workshops, onAdd }) {
               ))}
             </div>
           </div>
-          <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 mb-2">
-            <div className="flex items-start gap-2">
-              <svg className="w-5 h-5 text-blue-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-              </svg>
-              <div className="text-xs text-blue-700">
-                <strong>Hinweis:</strong> Diese Regel bedeutet, dass der Schüler <strong>alle</strong> ausgewählten Kurse irgendwann einmal belegt haben muss. Die Regel ist erfüllt, wenn der Schüler in seiner gesamten Historie alle Kurse mindestens einmal zugeordnet bekommen hat.
-              </div>
-            </div>
-          </div>
+          {ruleType === "belegung" && (
+            <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3">
+              Der Schüler muss <strong>jeden</strong> ausgewählten Kurs mindestens einmal in der Historie belegt haben.
+            </p>
+          )}
+          {ruleType === "mindestbelegung" && (
+            <p className="text-xs text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg p-3">
+              Es zählen <strong>verschiedene</strong> Kurse aus der Auswahl (z. B. 3 von 10 Kunst-Werkstätten).
+            </p>
+          )}
         </>
-      ) : (
+      ) : ruleType === "folgekurs" ? (
         <>
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Ausgangskurs (wenn Schüler diesen Kurs belegt):</label>
@@ -6249,7 +8455,7 @@ function CreateRuleForm({ workshops, onAdd }) {
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
             >
               <option value="">-- Ausgangskurs wählen --</option>
-              {workshops.map(w => (
+              {sortedWorkshops.map(w => (
                 <option key={w} value={w}>{w}</option>
               ))}
             </select>
@@ -6262,7 +8468,7 @@ function CreateRuleForm({ workshops, onAdd }) {
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
             >
               <option value="">-- Folgekurs wählen --</option>
-              {workshops.map(w => (
+              {sortedWorkshops.map(w => (
                 <option key={w} value={w}>{w}</option>
               ))}
             </select>
@@ -6270,12 +8476,12 @@ function CreateRuleForm({ workshops, onAdd }) {
           <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
             <input 
               type="checkbox" 
-              id="sameBand"
+              id={sameBandInputId}
               checked={sameBand} 
               onChange={e=>setSameBand(e.target.checked)}
               className="w-4 h-4 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500"
             />
-            <label htmlFor="sameBand" className="ml-2 text-sm font-medium text-gray-700 cursor-pointer">
+            <label htmlFor={sameBandInputId} className="ml-2 text-sm font-medium text-gray-700 cursor-pointer">
               Folgekurs muss im gleichen Band sein wie der Ausgangskurs
             </label>
           </div>
@@ -6290,14 +8496,48 @@ function CreateRuleForm({ workshops, onAdd }) {
             </div>
           </div>
         </>
-      )}
+      ) : null}
       
-      <button 
-        onClick={submit} 
-        className="w-full px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-lg shadow-sm hover:from-orange-600 hover:to-orange-700 hover:shadow-md transition-all duration-200"
-      >
-        Regel erstellen
-      </button>
+      <div className="flex flex-col sm:flex-row gap-3 pt-2">
+        <button 
+          type="button"
+          onClick={submit} 
+          className="flex-1 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-lg shadow-sm hover:from-orange-600 hover:to-orange-700 hover:shadow-md transition-all duration-200"
+        >
+          {isEdit ? 'Änderungen speichern' : 'Regel erstellen'}
+        </button>
+        {onCancel && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-6 py-3 rounded-lg border border-gray-300 bg-white text-gray-700 font-medium hover:bg-gray-50"
+          >
+            Schließen
+          </button>
+        )}
+      </div>
+      {isEdit && (onDuplicate || onDelete) && (
+        <div className="flex flex-col sm:flex-row gap-2 mt-2">
+          {onDuplicate && (
+            <button
+              type="button"
+              onClick={onDuplicate}
+              className="flex-1 px-4 py-2 text-sm font-medium text-purple-800 bg-purple-50 border border-purple-200 rounded-lg hover:bg-purple-100"
+            >
+              Regel duplizieren
+            </button>
+          )}
+          {onDelete && (
+            <button
+              type="button"
+              onClick={onDelete}
+              className="flex-1 px-4 py-2 text-sm font-medium text-red-700 bg-red-50 border border-red-200 rounded-lg hover:bg-red-100"
+            >
+              Regel löschen
+            </button>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -6557,6 +8797,7 @@ function ColorPicker({ currentColor, usedColors, allWorkshopColors = {}, onColor
           </div>
         </>
       )}
+
     </div>
   );
 }
