@@ -210,11 +210,6 @@ function ruleTitle(rule) {
   return 'Alle Kurse';
 }
 
-/** A named „oder“ list is one choice among the courses, not every course. */
-function ruleIsOrList(rule) {
-  return /\boder\b/i.test(ruleTitle(rule));
-}
-
 function findPlanAt(sortedPlans, schoolYearStart, trimester) {
   return (
     sortedPlans.find(
@@ -354,36 +349,14 @@ export function buildStudentVotingOutlook({
     if (deadlineStufe == null || (anchorStufe != null && deadlineStufe < anchorStufe)) return;
     if (type === 'belegung') {
       const title = ruleTitle(rule);
-      const options = rule.options || [];
-      const missing = listMissingFromOptions(historyFlat, options);
-      const orList = ruleIsOrList(rule) && options.length > 1;
-      if (orList) {
-        const satisfied = options.some(course => historyFlat.includes(course));
-        if (!satisfied && missing.length > 1) {
-          demands.push({
-            kind: 'pick',
-            mode: 'or',
-            stillNeed: 1,
-            pool: missing,
-            deadlineStufe,
-            ruleName: title,
-          });
-        } else if (!satisfied && missing.length === 1) {
-          rememberCourse(missing[0], deadlineStufe, {
-            ruleName: title,
-            kind: 'belegung',
-            text: `Muss bis Stufe ${deadlineStufe} belegt sein und fehlt noch.`,
-          });
-        }
-      } else {
-        missing.forEach(course =>
-          rememberCourse(course, deadlineStufe, {
-            ruleName: title,
-            kind: 'belegung',
-            text: `Muss bis Stufe ${deadlineStufe} belegt sein und fehlt noch.`,
-          })
-        );
-      }
+      const missing = listMissingFromOptions(historyFlat, rule.options);
+      missing.forEach(course =>
+        rememberCourse(course, deadlineStufe, {
+          ruleName: title,
+          kind: 'belegung',
+          text: `Muss bis Stufe ${deadlineStufe} belegt sein und fehlt noch.`,
+        })
+      );
     } else if (type === 'mindestbelegung') {
       const missing = listMissingFromOptions(historyFlat, rule.options);
       const stillNeed = Math.min(

@@ -366,7 +366,7 @@ const RULES = [
   {
     id: 1001,
     type: 'belegung',
-    name: 'Handwerk-Basis (Holz oder Textil)',
+    name: 'Handwerk-Basis (Holz und Textil)',
     options: ['Holzwerkstatt', 'Textil & Nähen'],
     klassenStufenRange: { from: 5, to: 7 },
     einschulungsjahrFrom: null,

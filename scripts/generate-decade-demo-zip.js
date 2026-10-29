@@ -888,7 +888,7 @@ async function main() {
   }, null, 2));
   zip.file('rules.csv', toCsv([
     ['RuleType', 'RuleName', 'Options', 'FromCourse', 'ToCourse', 'SameBand', 'Duration', 'MinCount', 'Description', 'KlassenStufen', 'EinschulungVon', 'EinschulungBis'],
-    ['belegung', 'Handwerk-Basis (Holz oder Textil)', 'Holzwerkstatt, Textil & Nähen', '', '', 'false', '', '', '', '5-7', '', ''],
+    ['belegung', 'Handwerk-Basis (Holz und Textil)', 'Holzwerkstatt, Textil & Nähen', '', '', 'false', '', '', '', '5-7', '', ''],
     ['mindestbelegung', 'MINT & Medien (mind. 2)', 'Film & Medien, Robotik Lab, Druck & Grafik, Film Grundlagen, Computer-AG, Coding & Apps', '', '', 'false', '', '2', '', '8-10', '', ''],
     ['belegung', 'Digital früher (Computer oder Robotik)', 'Computer-AG, Robotik Lab', '', '', 'false', '', '', '', '6-8', '2012', '2018'],
     ['folgekurs', 'Film Grundlagen → Vertiefung', '', 'Film Grundlagen', 'Film Vertiefung', 'true', '', '', '', '6-10', '', ''],
