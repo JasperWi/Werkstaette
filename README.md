@@ -10,12 +10,6 @@ Der Zeitstrahl zeigt, welches Trimester schon belegt ist und welches nur geplant
 
 ![Zeitstrahl 2019/2020 mit drei Bändern und den Jahrgängen als farbige Linien](docs/screenshots/trimester-2019.png)
 
-![Zeitstrahl 2026/2027: das letzte Trimester ist nur geplant, die Linien enden am offenen Rand](docs/screenshots/trimester-2026.png)
-
-Ein Klick auf einen Jahrgang zeigt, was ab dem nächsten Trimester noch fest gewählt werden muss und wie viele Wahlen frei bleiben.
-
-![Jahrgang 2024: Holz und Metall müssen beide belegt werden, zwei Wahlen bleiben frei](docs/screenshots/trimester-zeitstrahl.png)
-
 Steht zwischen den Kursen **und**, müssen beide belegt werden. Das ist die Regel „Alle Kurse“. Eine Regel heißt nicht plötzlich „oder“, nur weil das Wort im Namen vorkommt. „Oder“ und „n von diesen“ kommen von der Regel **Mindestanzahl**.
 
 ## Wahl und Zuordnung
@@ -24,11 +18,9 @@ Pro Band eine Wahl-Datei hochladen, dann automatisch zuordnen oder die Karten vo
 
 ![Manuelle Anpassung: die Karten von Anna, Ben und Clara liegen unter Nicht zugeordnet](docs/screenshots/wahl.png)
 
-## Schüler
+Im offenen Trimester der Zehn-Jahres-Demo liegt nach der automatischen Zuordnung fast jede Karte auf einer abgegebenen Wahl. Im zweiten Band bleiben zwei Hinweise stehen, und Theater & Bühne ist um einen Platz über der Kapazität.
 
-Klasse, Einschulungsjahr und die offenen Regeln stehen auf der Karte. „Alle Kurse“ ist erst erfüllt, wenn jeder genannte Kurs mindestens einmal belegt wurde.
-
-![Pflicht bis Stufe 6: Holz und Metall fehlen noch](docs/screenshots/schueler-pflicht.png)
+![Zweites Band 2026/27: die Kurse sind verteilt, zwei Schülerkarten zeigen noch einen Hinweis](docs/screenshots/wahl-demo.png)
 
 ## Belegungs-Regeln
 
@@ -39,15 +31,9 @@ Vier Arten:
 - **Folgekurs** — nach einem Kurs im nächsten Trimester ein bestimmter Kurs, auf Wunsch im selben Band.
 - **Freitext** — eine Erinnerung zum Abhaken, ohne Kursliste.
 
-Der Zeitraum ist eine Spanne von Klassenstufen. Zusätzlich kann die Regel auf einen Einschulungsjahrgang begrenzt werden.
+Der Zeitraum ist eine Spanne von Klassenstufen. Zusätzlich kann die Regel auf einen Einschulungsjahrgang begrenzt werden. Im Editor bleibt der Typ einer bestehenden Regel fest; Zeitraum, Name und Kurse lassen sich anpassen.
 
-![Regelliste: Alle Kurse neben einer Freitext-Regel](docs/screenshots/belegungsregeln.png)
-
-## Berichte
-
-PDF und Excel für das gewählte Trimester: Werkstätten, Klassen, und die belegten Kurse je Schüler über die Trimester. Der Kursverlauf ist quer und trennt Schuljahr und Trimester.
-
-![Berichte: Werkstatt-Übersicht, Klassen und der Anfang der belegten Kurse](docs/screenshots/berichte.png)
+![Handwerk-Basis im Editor: Stufe 5 bis 7, Alle Kurse, Holzwerkstatt und Textil sind angehakt](docs/screenshots/belegungsregeln.png)
 
 ## Werkstätten
 
