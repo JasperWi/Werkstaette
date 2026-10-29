@@ -1,7 +1,7 @@
 /**
  * Second demo: ten school years, cohorts from Stufe 5 through graduation at Stufe 10,
  * courses that start, change, and get archived.
- * The newest trimester is planned only — no assignment file and no Wahl upload.
+ * The newest trimester is planned only — Wahl uploads for its bands, no assignment file.
  *
  * Usage: node scripts/generate-decade-demo-zip.js
  * Output: scripts/output/werkstatt-demo-10-jahre.zip
@@ -577,7 +577,7 @@ if (overfill >= 0) {
 
 function planNotes(tr) {
   if (tr.open) {
-    return 'Plan für 2026/27 T3: vier Bänder, die Jahrgänge teilen sich die Slots (5 mit 6, 6 mit 7, 8 mit 9, 9 mit 10). Die Wahl ist noch nicht hochgeladen, eine Zuordnung gibt es noch nicht.';
+    return 'Plan für 2026/27 T3: vier Bänder, die Jahrgänge teilen sich die Slots (5 mit 6, 6 mit 7, 8 mit 9, 9 mit 10). Die Wahl ist hochgeladen, eine Zuordnung gibt es noch nicht.';
   }
   const stories = {
     '2017-1': 'Start. Zwei Bänder, aber das 1. Band gehört Stufe 5 und 6 zusammen: Holz Grundlagen, Nähen, Küche, Schulgarten. Stufe 6 hat zusätzlich das 2. Band mit Textil, Theater, Fotolabor und Computer-AG.',
@@ -608,7 +608,7 @@ function planNotes(tr) {
     '2025-2': 'Prüfungswochen, ein Band fällt aus. Stufe 5, 6 und 7 teilen sich das 1. Band. 8 mit 9, 9 mit 10 bleiben.',
     '2025-3': 'Vier Bänder wieder wie im Herbst. Letztes vollständig zugeordnetes Trimester in diesem Schuljahr.',
     '2026-1': 'Neues Jahr, dieselbe Teilung: 5 mit 6, 6 mit 7, 8 mit 9, 9 mit 10. Upcycling bleibt bei den älteren Bändern.',
-    '2026-2': 'Letzte abgeschlossene Wahl, die Jahrgänge teilen sich die Bänder wie im Herbst. Trimester 3 ist geplant, der Upload fehlt.',
+    '2026-2': 'Letzte abgeschlossene Wahl, die Jahrgänge teilen sich die Bänder wie im Herbst. Trimester 3 ist geplant, die Zuordnung fehlt noch.',
   };
   return stories[`${tr.year}-${tr.trimester}`] || 'Wahl und Zuordnung für dieses Trimester.';
 }
@@ -726,12 +726,32 @@ function buildPlans() {
   return plans;
 }
 
+function choiceRowsForBand(tr, bandIndex) {
+  const bandId = BAND_IDS[bandIndex];
+  const access = bandAccess(tr.year, tr.trimester);
+  const offered = coursesOnBand(tr.year, bandIndex, tr.trimester).map(course => course.name);
+  const index = TRIMESTERS.indexOf(tr);
+  const rows = [['Student', 'Klasse', 'Wahl 1', 'Wahl 2']];
+  students.forEach(student => {
+    if (!votesInYear(student, tr.year, tr.trimester)) return;
+    if (!(access[formulaStufe(student, tr.year)] || []).includes(bandId)) return;
+    const assigned = tr.open ? null : assignments[index][student.name][bandIndex];
+    const seed = hashSeed(student.name, tr.year * 3 + tr.trimester, bandIndex);
+    const keep = assigned && assigned !== 'Nicht Zugeordnet' && seed % 5 < 2 && offered.includes(assigned);
+    const wahl1 = keep ? assigned : offered[seed % offered.length];
+    let wahl2 = offered[(seed + 3) % offered.length];
+    if (wahl2 === wahl1) wahl2 = offered.find(name => name !== wahl1) || wahl1;
+    rows.push([student.name, classNameAt(student, tr.year), wahl1, wahl2]);
+  });
+  return rows;
+}
+
 function validate() {
   const active = COURSES.filter(isActive);
   const archived = COURSES.filter(course => !isActive(course));
   if (students.length < 160) throw new Error(`expected a large cohort, got ${students.length}`);
   if (TRIMESTERS.length !== 30) throw new Error(`expected 30 trimesters, got ${TRIMESTERS.length}`);
-  if (!TRIMESTERS[TRIMESTERS.length - 1].open) throw new Error('newest trimester must stay without an upload');
+  if (!TRIMESTERS[TRIMESTERS.length - 1].open) throw new Error('newest trimester must stay without an assignment');
   TRIMESTERS.forEach((tr, index) => {
     const count = bandCount(tr.year, tr.trimester);
     for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
@@ -741,6 +761,29 @@ function validate() {
     }
     if (tr.open) {
       if (assignments[index]) throw new Error('open trimester has assignments');
+      const key = slotKey(tr.year, tr.trimester);
+      for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
+        const bandId = BAND_IDS[bandIndex];
+        const fileName = `choices/${key}_${bandId}.csv`;
+        const rows = choiceRowsForBand(tr, bandIndex);
+        if (rows.length < 2) throw new Error(`open trimester missing choice file ${fileName}`);
+        const offered = coursesOnBand(tr.year, bandIndex, tr.trimester).map(course => course.name);
+        const expected = students.filter(student => (
+          votesInYear(student, tr.year, tr.trimester)
+          && (bandAccess(tr.year, tr.trimester)[formulaStufe(student, tr.year)] || []).includes(bandId)
+        )).length;
+        if (rows.length - 1 !== expected) {
+          throw new Error(`${fileName} has ${rows.length - 1} choices, expected ${expected}`);
+        }
+        rows.slice(1).forEach(row => {
+          const [name, klasse, wahl1, wahl2] = row;
+          if (!klasse) throw new Error(`${name} missing Klasse in ${fileName}`);
+          if (!offered.includes(wahl1) || !offered.includes(wahl2)) {
+            throw new Error(`${name} choice not offered in ${fileName}`);
+          }
+          if (wahl1 === wahl2) throw new Error(`${name} has identical choices in ${fileName}`);
+        });
+      }
       return;
     }
     students.forEach(student => {
@@ -884,39 +927,28 @@ async function main() {
   let voteFiles = 0;
   let voteRows = 0;
   TRIMESTERS.forEach((tr, index) => {
-    if (tr.open) return;
     const key = slotKey(tr.year, tr.trimester);
     const count = bandCount(tr.year, tr.trimester);
-    const access = bandAccess(tr.year, tr.trimester);
-    const headers = ['Student', ...BAND_HEADERS.slice(0, count), 'Timestamp'];
-    const rows = [headers];
-    const voters = students.filter(student => assignments[index][student.name]);
-    voters.forEach(student => {
-      const row = [student.name];
-      for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
-        const value = assignments[index][student.name][bandIndex];
-        row.push(value || '');
-      }
-      row.push(timestampFor(tr.year, tr.trimester));
-      rows.push(row);
-    });
-    zip.file(`assignments/${key}.csv`, toCsv(rows));
+
+    if (!tr.open) {
+      const headers = ['Student', ...BAND_HEADERS.slice(0, count), 'Timestamp'];
+      const rows = [headers];
+      const voters = students.filter(student => assignments[index][student.name]);
+      voters.forEach(student => {
+        const row = [student.name];
+        for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
+          const value = assignments[index][student.name][bandIndex];
+          row.push(value || '');
+        }
+        row.push(timestampFor(tr.year, tr.trimester));
+        rows.push(row);
+      });
+      zip.file(`assignments/${key}.csv`, toCsv(rows));
+    }
 
     for (let bandIndex = 0; bandIndex < count; bandIndex += 1) {
       const bandId = BAND_IDS[bandIndex];
-      const offered = coursesOnBand(tr.year, bandIndex, tr.trimester).map(course => course.name);
-      const choiceRows = [['Student', 'Klasse', 'Wahl 1', 'Wahl 2']];
-      voters.forEach(student => {
-        const stufe = formulaStufe(student, tr.year);
-        if (!(access[stufe] || []).includes(bandId)) return;
-        const assigned = assignments[index][student.name][bandIndex];
-        const seed = hashSeed(student.name, tr.year * 3 + tr.trimester, bandIndex);
-        const keep = assigned && assigned !== 'Nicht Zugeordnet' && seed % 5 < 2 && offered.includes(assigned);
-        const wahl1 = keep ? assigned : offered[seed % offered.length];
-        let wahl2 = offered[(seed + 3) % offered.length];
-        if (wahl2 === wahl1) wahl2 = offered.find(name => name !== wahl1) || wahl1;
-        choiceRows.push([student.name, classNameAt(student, tr.year), wahl1, wahl2]);
-      });
+      const choiceRows = choiceRowsForBand(tr, bandIndex);
       if (choiceRows.length > 1) {
         zip.file(`choices/${key}_${bandId}.csv`, toCsv(choiceRows));
         voteFiles += 1;
@@ -950,9 +982,8 @@ Die Notiz jedes Trimesters erzählt, wer sich ein Band teilt und was sich an den
 Kurse, die wegfallen, stehen in archived-workshops.csv
 (Fotolabor, Computer-AG, Schulgarten, Töpfern, Siebdruck, Holz Grundlagen, Nähen Einsteiger, Schülerzeitung, Schach & Strategie).
 
-${openKey} ist nur geplant: Bänder, Stufen und Kurse stehen.
-Keine Zuordnungsdatei und keine Wahl-CSV. Der Upload fehlt noch.
-Alle früheren Trimester haben Zuordnung und Wahl-Upload (${voteFiles} Wahl-Dateien, ${voteRows} Zeilen).
+${openKey} ist nur geplant: Bänder, Stufen und Kurse stehen. Die Wahl ist hochgeladen, eine Zuordnung gibt es nicht.
+Wahl-Upload: ${voteFiles} Dateien, ${voteRows} Zeilen. Zuordnung für alle früheren Trimester.
 `);
 
   if (!fs.existsSync(OUT_DIR)) fs.mkdirSync(OUT_DIR, { recursive: true });
@@ -961,7 +992,7 @@ Alle früheren Trimester haben Zuordnung und Wahl-Upload (${voteFiles} Wahl-Date
   fs.writeFileSync(outPath, buffer);
   console.log(`Demo-ZIP: ${outPath}`);
   console.log(`${students.length} Schüler, ${TRIMESTERS.length} Trimester, ${counts.active} aktive Kurse, ${counts.archived} archiviert`);
-  console.log(`${openKey} ohne Wahl-Upload. ${voteFiles} Wahl-Dateien für die früheren Trimester.`);
+  console.log(`${openKey} mit Wahl, ohne Zuordnung. ${voteFiles} Wahl-Dateien.`);
 }
 
 main().catch(err => {
