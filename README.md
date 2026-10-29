@@ -14,9 +14,7 @@ Steht zwischen den Kursen **und**, müssen beide belegt werden. Das ist die Rege
 
 ## Wahl und Zuordnung
 
-Pro Band eine Wahl-Datei hochladen, dann automatisch zuordnen oder die Karten von Hand ziehen. Ein Hinweis bleibt auf der Schülerkarte, solange die Bedingung gilt, und lässt sich auf das Warndreieck einklappen. Eine volle Werkstatt erkennt man an der roten Zahl in der Spalte, nicht an einem Hinweis auf jeder Karte.
-
-![Manuelle Anpassung: die Karten von Anna, Ben und Clara liegen unter Nicht zugeordnet](docs/screenshots/wahl.png)
+Pro Band eine Wahl-Datei hochladen, dann automatisch zuordnen oder die Karten von Hand ziehen.
 
 Im offenen Trimester der Zehn-Jahres-Demo liegt nach der automatischen Zuordnung fast jede Karte auf einer abgegebenen Wahl. Im zweiten Band bleiben zwei Hinweise stehen, und Theater & Bühne ist um einen Platz über der Kapazität.
 
