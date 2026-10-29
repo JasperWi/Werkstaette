@@ -23,7 +23,7 @@ import {
   bandIdsInObject,
   MAX_BAND_COUNT,
 } from "./trimesterPlans";
-import { isStudentExpectedToVoteOnBand } from "./studentFlowHelpers";
+import { getAllowedBandIdsForStudent, getStudentStufeForPlan, isStudentExpectedToVoteOnBand } from "./studentFlowHelpers";
 
 // WerkstattVerwaltungApp.jsx
 // Single-file React app (Tailwind CSS assumed) providing an administrative GUI
@@ -168,6 +168,227 @@ function buildStudentReportRows(student, assignments, bandIds, rooms, teachers) 
     const teacher = workshop !== 'Nicht zugeordnet' ? (teachers[workshop] || 'N/A') : '-';
     return [index === 0 ? student : '', getBandShortLabel(bandId), workshop, room, teacher];
   });
+}
+
+const COURSE_REPORT_FALLBACKS = ['#0F766E', '#1D4ED8', '#B45309', '#6D28D9', '#BE123C', '#047857', '#0369A1', '#A16207'];
+
+function courseReportColor(name, workshopColors) {
+  const stored = String(workshopColors?.[name] || '').trim();
+  if (/^#?[0-9a-fA-F]{6}$/.test(stored)) return stored.startsWith('#') ? stored : `#${stored}`;
+  let hash = 0;
+  const text = String(name || '');
+  for (let i = 0; i < text.length; i += 1) hash = (hash * 33 + text.charCodeAt(i)) >>> 0;
+  return COURSE_REPORT_FALLBACKS[hash % COURSE_REPORT_FALLBACKS.length];
+}
+
+function hexToRgbTriplet(hex) {
+  const h = String(hex).replace('#', '');
+  return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16)];
+}
+
+function compareSlotKeys(a, b) {
+  const left = a ? parseSchoolYearKey(a) : null;
+  const right = b ? parseSchoolYearKey(b) : null;
+  if (!left && !right) return 0;
+  if (!left) return 1;
+  if (!right) return -1;
+  if (left.schoolYearStart !== right.schoolYearStart) return left.schoolYearStart - right.schoolYearStart;
+  return left.trimester - right.trimester;
+}
+
+function payloadWasPerformed(payload) {
+  if (!payload?.assignments || typeof payload.assignments !== 'object') return false;
+  if (isLegacySingleBandAssignments(payload.assignments)) {
+    return Object.values(payload.assignments).some(value => value && !isNotAssigned(value));
+  }
+  return bandIdsInObject(payload.assignments).some(bandId =>
+    Object.values(payload.assignments[bandId] || {}).some(value => value && !isNotAssigned(value))
+  );
+}
+
+function coursesAssignedToStudent(payload, student) {
+  if (!payload?.assignments) return [];
+  if (isLegacySingleBandAssignments(payload.assignments)) {
+    const value = payload.assignments[student];
+    return value && !isNotAssigned(value) ? [String(value)] : [];
+  }
+  return bandIdsInObject(payload.assignments)
+    .map(bandId => payload.assignments[bandId]?.[student])
+    .filter(value => value && !isNotAssigned(value))
+    .map(value => String(value));
+}
+
+function performedSlotKeysThrough(confirmedAssignments, cutoffKey) {
+  return Object.keys(confirmedAssignments || {})
+    .filter(key => parseSchoolYearKey(key) && payloadWasPerformed(confirmedAssignments[key]) && compareSlotKeys(key, cutoffKey) <= 0)
+    .sort(compareSlotKeys);
+}
+
+function plainTrimesterLabel(slotKey) {
+  const parsed = slotKey ? parseSchoolYearKey(slotKey) : null;
+  if (!parsed) return String(slotKey || '');
+  const trimesterName = { 1: 'erstes Trimester', 2: 'zweites Trimester', 3: 'drittes Trimester' }[parsed.trimester]
+    || `${parsed.trimester}. Trimester`;
+  const endShort = String(parsed.schoolYearEnd).slice(-2);
+  return `Schuljahr ${parsed.schoolYearStart}/${endShort}, ${trimesterName}`;
+}
+
+function plainCourseReportIntro(selectedKey, throughKey) {
+  const through = plainTrimesterLabel(throughKey);
+  if (selectedKey === throughKey) {
+    return `Alle Kurse bis einschließlich ${through}.`;
+  }
+  return `Alle Kurse bis einschließlich ${through}. Für „${plainTrimesterLabel(selectedKey)}“ sind die Kurse noch nicht eingeteilt.`;
+}
+
+function coursesInTrimester(student, confirmedAssignments, slotKey) {
+  const seen = new Set();
+  const courses = [];
+  coursesAssignedToStudent(confirmedAssignments[slotKey], student).forEach(name => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    courses.push(name);
+  });
+  return courses;
+}
+
+function coursesByTrimesterForStudent(student, confirmedAssignments, cutoffKey) {
+  return performedSlotKeysThrough(confirmedAssignments, cutoffKey)
+    .map(key => {
+      const parsed = parseSchoolYearKey(key);
+      const endShort = parsed ? String(parsed.schoolYearEnd).slice(-2) : '';
+      const trimester = parsed?.trimester || 0;
+      return {
+        key,
+        label: plainTrimesterLabel(key),
+        yearLabel: parsed ? `${parsed.schoolYearStart}/${endShort}` : key,
+        trimesterLabel: trimester ? `${trimester}. Trimester` : key,
+        courses: coursesInTrimester(student, confirmedAssignments, key),
+      };
+    })
+    .filter(group => group.courses.length > 0);
+}
+
+function wrapCourseNames(doc, courses, maxWidth) {
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8);
+  const lines = [];
+  let line = [];
+  let width = 0;
+  const dotWidth = doc.getTextWidth(' · ');
+  courses.forEach(name => {
+    const nameWidth = doc.getTextWidth(name);
+    if (line.length && width + dotWidth + nameWidth > maxWidth) {
+      lines.push(line);
+      line = [name];
+      width = nameWidth;
+      return;
+    }
+    if (line.length) width += dotWidth;
+    line.push(name);
+    width += nameWidth;
+  });
+  if (line.length) lines.push(line);
+  return lines.length ? lines : [['—']];
+}
+
+function layoutStudentTimeline(doc, groups, maxWidth) {
+  const courseWidth = Math.max(40, maxWidth - 58);
+  if (!groups.length) {
+    return { rows: [], height: 8 };
+  }
+  let lastYear = '';
+  const rows = groups.map((group, index) => {
+    const showYear = group.yearLabel !== lastYear;
+    lastYear = group.yearLabel;
+    const courseLines = wrapCourseNames(doc, group.courses, courseWidth);
+    const height = Math.max(6.4, courseLines.length * 4.5 + 1.6);
+    return {
+      showYear,
+      yearLabel: group.yearLabel,
+      trimesterLabel: group.trimesterLabel,
+      courseLines,
+      height,
+      isFirst: index === 0,
+      isLast: index === groups.length - 1,
+    };
+  });
+  const height = rows.reduce((sum, row) => sum + row.height, 0) + 2;
+  return { rows, height };
+}
+
+function drawCourseNameLine(doc, names, x, y, workshopColors) {
+  let cursor = x;
+  doc.setFontSize(8);
+  names.forEach((name, index) => {
+    if (index > 0) {
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(148, 163, 184);
+      doc.text(' · ', cursor, y);
+      cursor += doc.getTextWidth(' · ');
+    }
+    if (name === '—') {
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(148, 163, 184);
+    } else {
+      const [red, green, blue] = hexToRgbTriplet(courseReportColor(name, workshopColors));
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(red, green, blue);
+    }
+    doc.text(name, cursor, y);
+    cursor += doc.getTextWidth(name);
+  });
+}
+
+function drawStudentTimeline(doc, layout, x, y, workshopColors) {
+  if (!layout.rows.length) {
+    doc.setFont('helvetica', 'italic');
+    doc.setFontSize(8);
+    doc.setTextColor(148, 163, 184);
+    doc.text('Noch keine Kurse', x + 1, y + 4);
+    doc.setTextColor(0, 0, 0);
+    doc.setFont('helvetica', 'normal');
+    return;
+  }
+  const spineX = x + 20;
+  const centers = [];
+  let cursor = y + 1.2;
+  layout.rows.forEach(row => {
+    centers.push({ y: cursor + 2.2, row });
+    cursor += row.height;
+  });
+  if (centers.length > 1) {
+    doc.setDrawColor(217, 119, 6);
+    doc.setLineWidth(0.45);
+    doc.line(spineX, centers[0].y, spineX, centers[centers.length - 1].y);
+  }
+  centers.forEach(({ y: dotY, row }) => {
+    if (row.showYear) {
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(7.5);
+      const chipWidth = doc.getTextWidth(row.yearLabel) + 2.2;
+      doc.setFillColor(255, 247, 237);
+      doc.setDrawColor(251, 191, 36);
+      doc.setLineWidth(0.2);
+      doc.roundedRect(x + 0.4, dotY - 2.5, chipWidth, 4.2, 0.8, 0.8, 'FD');
+      doc.setTextColor(146, 64, 14);
+      doc.text(row.yearLabel, x + 1.4, dotY + 0.5);
+    }
+    doc.setFillColor(180, 83, 9);
+    doc.circle(spineX, dotY, 0.85, 'F');
+    doc.setDrawColor(180, 83, 9);
+    doc.setLineWidth(0.35);
+    doc.line(spineX + 0.8, dotY, spineX + 3.2, dotY);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(8);
+    doc.setTextColor(120, 53, 15);
+    doc.text(row.trimesterLabel, spineX + 4, dotY + 0.9);
+    row.courseLines.forEach((names, lineIndex) => {
+      drawCourseNameLine(doc, names, x + 52, dotY + 0.9 + lineIndex * 4.5, workshopColors);
+    });
+  });
+  doc.setTextColor(0, 0, 0);
+  doc.setFont('helvetica', 'normal');
 }
 
 function computeBandStatistics(assignments, choices, bandIds) {
@@ -1672,17 +1893,17 @@ function parseKlassenStufenRangeFromCsvCell(cell) {
   return { from: list[0], to: list[list.length - 1] };
 }
 
-// Check if student needs to follow a Folgekurs rule
-function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses = {}, studentEnrollmentYears = {}) {
+// Alle Folgekurs-Pflichten aus dem direkt vorherigen Trimester.
+function listRequiredFolgekurse(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses = {}, studentEnrollmentYears = {}) {
   const folgekursRules = rules.filter(
     r => (r.type || 'belegung') === 'folgekurs' && ruleEnforcesNow(r, student, studentClasses, studentEnrollmentYears)
   );
-  if (folgekursRules.length === 0) return null;
+  if (folgekursRules.length === 0) return [];
   
   const prevKey = getPreviousTrimesterKey(schoolYearStart, schoolYearEnd, currentTrimester);
   const prevAssignment = confirmedAssignments[prevKey];
   
-  if (!prevAssignment || !prevAssignment.assignments) return null;
+  if (!prevAssignment || !prevAssignment.assignments) return [];
   
   const prevBandIds = getPayloadBandIds(prevAssignment);
   let prevCourseByBand = {};
@@ -1701,6 +1922,7 @@ function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearSt
     });
   }
   
+  const found = [];
   for (const rule of folgekursRules) {
     let prevBand = null;
     for (const bandId of prevBandIds) {
@@ -1709,16 +1931,35 @@ function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearSt
         break;
       }
     }
-    
-    if (prevBand) {
-      if (rule.sameBand) {
-        return { course: rule.toCourse, band: prevBand };
-      }
-      return { course: rule.toCourse, band: null };
+    if (!prevBand) continue;
+    const item = {
+      course: rule.toCourse,
+      fromCourse: rule.fromCourse,
+      band: rule.sameBand ? prevBand : null,
+    };
+    if (!found.some(existing => existing.course === item.course && existing.band === item.band)) {
+      found.push(item);
     }
   }
-  
-  return null;
+  return found;
+}
+
+function getRequiredFolgekurs(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses = {}, studentEnrollmentYears = {}) {
+  return listRequiredFolgekurse(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, band, studentClasses, studentEnrollmentYears)[0] || null;
+}
+
+function folgekursBlockedByMissingYear(student, rules, confirmedAssignments, schoolYearStart, schoolYearEnd, currentTrimester, studentClasses, studentEnrollmentYears) {
+  const candidates = rules.filter(rule => {
+    if ((rule.type || 'belegung') !== 'folgekurs') return false;
+    if (getStudentCohortRuleStatus(rule, student, studentEnrollmentYears) !== 'missing') return false;
+    return getRuleZeitraumPhase(rule, student, studentClasses) === 'active';
+  });
+  if (!candidates.length) return null;
+  const prevKey = getPreviousTrimesterKey(schoolYearStart, schoolYearEnd, currentTrimester);
+  const taken = new Set(coursesAssignedToStudent(confirmedAssignments[prevKey], student));
+  const hit = candidates.find(rule => taken.has(rule.fromCourse));
+  if (!hit) return null;
+  return `Einschulungsjahr fehlt. Ob nach ${hit.fromCourse} der Folgekurs ${hit.toCourse} gilt, ist deshalb offen.`;
 }
 
 function isFolgekursFulfilled(requiredFolgekurs, assignments, student, activeBandIds) {
@@ -2668,13 +2909,21 @@ export default function WerkstattVerwaltungApp() {
       setCheckedWarnings({});
     }
     
-    // Reset violations (they are specific to current assignments)
-    setPersistentViolations({});
-    setDropViolations({});
+    // Zuordnungen speichern setzt confirmedAssignments neu. Die Hinweise am Schüler
+    // bleiben dabei stehen und werden nur beim Wechsel des Trimesters geleert.
     
     // Reset upload summary
     setUploadSummary(null);
   }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, confirmedAssignments, students, tab, trimesterPlans]);
+
+  const studentNoteScopeRef = useRef('');
+  useEffect(() => {
+    const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    if (studentNoteScopeRef.current === key) return;
+    studentNoteScopeRef.current = key;
+    setStudentStickyNotes({});
+    setCollapsedStudentNotes({});
+  }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester]);
 
   useEffect(() => {
     if (tab !== 'wahl' || definedTrimesterList.length === 0) return;
@@ -2788,7 +3037,8 @@ export default function WerkstattVerwaltungApp() {
 
   // drag/drop UI state
   const [dragHover, setDragHover] = useState({ workshop: null, invalid: false, message: null });
-  const [dropViolations, setDropViolations] = useState({}); // Temporary violations (cleared after 5s)
+  const [studentStickyNotes, setStudentStickyNotes] = useState({});
+  const [collapsedStudentNotes, setCollapsedStudentNotes] = useState({});
   const [persistentViolations, setPersistentViolations] = useState({}); // { workshopName: { studentName: message } }
   const scrollContainerRef = React.useRef(null);
   const topScrollbarRef = React.useRef(null);
@@ -3415,6 +3665,186 @@ export default function WerkstattVerwaltungApp() {
     
     save(LS_KEYS.assignments, copy);
     setConfirmedAssignments(copy);
+  }
+
+  function courseHistoryReportModel() {
+    const key = getSchoolYearKey(reportYearTrimester.schoolYearStart, reportYearTrimester.schoolYearEnd, reportYearTrimester.trimester);
+    const slots = performedSlotKeysThrough(confirmedAssignments, key);
+    const throughKey = slots[slots.length - 1] || null;
+    const studentsByClass = {};
+    students.forEach(student => {
+      const className = studentClasses[student] || 'Unbekannt';
+      if (!studentsByClass[className]) studentsByClass[className] = [];
+      studentsByClass[className].push(student);
+    });
+    const sortedClasses = Object.keys(studentsByClass).sort((a, b) => a.localeCompare(b, 'de'));
+    if (!throughKey) {
+      alert('Für den gewählten Zeitraum sind noch keine Kurse eingeteilt.');
+      return null;
+    }
+    if (!sortedClasses.length) {
+      alert('Keine Schüler vorhanden.');
+      return null;
+    }
+    const slotColumns = slots.map(slotKey => ({
+      key: slotKey,
+      label: plainTrimesterLabel(slotKey),
+    }));
+    const rowsForClass = (className) => (studentsByClass[className] || [])
+      .slice()
+      .sort((a, b) => a.localeCompare(b, 'de'))
+      .map(student => ({
+        student,
+        className,
+        groups: coursesByTrimesterForStudent(student, confirmedAssignments, key),
+      }));
+    return { key, throughKey, slots: slotColumns, sortedClasses, rowsForClass };
+  }
+
+  function courseHistoryExcelRows(className, rows, slots, key, throughKey) {
+    const tableData = [
+      ['Kurse nach Trimester'],
+      [`Klasse ${className}`],
+      [plainCourseReportIntro(key, throughKey)],
+      [`Erstellt am ${new Date().toLocaleDateString('de-DE')}`],
+      [],
+      ['Schüler', 'Klasse', ...slots.map(slot => slot.label)],
+    ];
+    rows.forEach(row => {
+      const byKey = Object.fromEntries(row.groups.map(group => [group.key, group.courses.join(', ')]));
+      tableData.push([
+        row.student,
+        row.className,
+        ...slots.map(slot => byKey[slot.key] || ''),
+      ]);
+    });
+    return tableData;
+  }
+
+  function writeCourseHistoryPdf(doc, sections, heading, key, throughKey) {
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    const margin = 12;
+    const studentWidth = 42;
+    const classWidth = 22;
+    const courseColWidth = pageWidth - margin * 2 - studentWidth - classWidth;
+    let yPos = 16;
+    const checkPageBreak = (requiredSpace = 20) => {
+      if (yPos + requiredSpace > pageHeight - 14) {
+        doc.addPage();
+        yPos = 16;
+      }
+    };
+
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(20);
+    doc.setTextColor(15, 23, 42);
+    doc.text(heading, pageWidth / 2, yPos, { align: 'center' });
+    yPos += 8;
+    doc.setFont('helvetica', 'normal');
+    doc.setFontSize(11);
+    doc.setTextColor(15, 118, 110);
+    const introLines = doc.splitTextToSize(plainCourseReportIntro(key, throughKey), pageWidth - 28);
+    doc.text(introLines, pageWidth / 2, yPos, { align: 'center' });
+    yPos += introLines.length * 5 + 2;
+    doc.setFontSize(9);
+    doc.setTextColor(100, 116, 139);
+    doc.text(`Erstellt am ${new Date().toLocaleDateString('de-DE')}`, pageWidth / 2, yPos, { align: 'center' });
+    yPos += 10;
+
+    sections.forEach((section, sectionIndex) => {
+      checkPageBreak(32);
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(15, 23, 42);
+      doc.text(`Klasse ${section.className}`, margin, yPos);
+      yPos += 3;
+      const lineCache = section.rows.map(row => layoutStudentTimeline(doc, row.groups, courseColWidth - 4));
+      autoTable(doc, {
+        startY: yPos,
+        head: [['Schüler', 'Klasse', 'Kurse nach Trimester']],
+        body: section.rows.map(row => [row.student, row.className, '']),
+        theme: 'plain',
+        headStyles: { fillColor: [180, 83, 9], textColor: 255, fontStyle: 'bold' },
+        styles: { fontSize: 8, cellPadding: 1.8, textColor: [15, 23, 42], font: 'helvetica', lineColor: [226, 232, 240], lineWidth: 0.1 },
+        columnStyles: {
+          0: { cellWidth: studentWidth, fontStyle: 'bold', valign: 'top' },
+          1: { cellWidth: classWidth, valign: 'top' },
+          2: { cellWidth: courseColWidth, valign: 'top' },
+        },
+        margin: { left: margin, right: margin },
+        didParseCell(data) {
+          if (data.section !== 'body' || data.column.index !== 2) return;
+          const layout = lineCache[data.row.index] || { height: 8 };
+          data.cell.text = [''];
+          data.cell.styles.minCellHeight = Math.max(8, layout.height + 2);
+        },
+        didDrawCell(data) {
+          if (data.section !== 'body' || data.column.index !== 2) return;
+          const layout = lineCache[data.row.index] || { rows: [], height: 8 };
+          drawStudentTimeline(doc, layout, data.cell.x + 1.5, data.cell.y + 1.2, workshopColors);
+        },
+      });
+      yPos = doc.lastAutoTable.finalY + 10;
+      if (sectionIndex < sections.length - 1) checkPageBreak(10);
+    });
+  }
+
+  function generatePDFAllCourseHistoryReport() {
+    const model = courseHistoryReportModel();
+    if (!model) return;
+    const doc = new jsPDF('l', 'mm', 'a4');
+    writeCourseHistoryPdf(
+      doc,
+      model.sortedClasses.map(className => ({ className, rows: model.rowsForClass(className) })),
+      'Kurse nach Trimester',
+      model.key,
+      model.throughKey
+    );
+    doc.save(`Belegte-Kurse_Alle_${model.key}.pdf`);
+  }
+
+  function generatePDFCourseHistoryByClass() {
+    const model = courseHistoryReportModel();
+    if (!model) return;
+    model.sortedClasses.forEach(className => {
+      const doc = new jsPDF('l', 'mm', 'a4');
+      writeCourseHistoryPdf(
+        doc,
+        [{ className, rows: model.rowsForClass(className) }],
+        `Kurse nach Trimester, Klasse ${className}`,
+        model.key,
+        model.throughKey
+      );
+      const safeClassName = className.replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_');
+      doc.save(`Belegte-Kurse_${safeClassName}_${model.key}.pdf`);
+    });
+  }
+
+  function generateExcelAllCourseHistoryReport() {
+    const model = courseHistoryReportModel();
+    if (!model) return;
+    const wb = XLSX.utils.book_new();
+    model.sortedClasses.forEach(className => {
+      const ws = XLSX.utils.aoa_to_sheet(courseHistoryExcelRows(className, model.rowsForClass(className), model.slots, model.key, model.throughKey));
+      ws['!cols'] = [{ wch: 28 }, { wch: 14 }, ...model.slots.map(() => ({ wch: 36 }))];
+      const safeSheetName = className.replace(/[:\\/?*[\]]/g, '_').substring(0, 31);
+      XLSX.utils.book_append_sheet(wb, ws, safeSheetName);
+    });
+    XLSX.writeFile(wb, `Belegte-Kurse_Alle_${model.key}.xlsx`);
+  }
+
+  function generateExcelCourseHistoryByClass() {
+    const model = courseHistoryReportModel();
+    if (!model) return;
+    model.sortedClasses.forEach(className => {
+      const wb = XLSX.utils.book_new();
+      const ws = XLSX.utils.aoa_to_sheet(courseHistoryExcelRows(className, model.rowsForClass(className), model.slots, model.key, model.throughKey));
+      ws['!cols'] = [{ wch: 28 }, { wch: 14 }, ...model.slots.map(() => ({ wch: 36 }))];
+      XLSX.utils.book_append_sheet(wb, ws, 'Kurse');
+      const safeClassName = className.replace(/[^a-zA-Z0-9äöüÄÖÜß]/g, '_');
+      XLSX.writeFile(wb, `Belegte-Kurse_${safeClassName}_${model.key}.xlsx`);
+    });
   }
 
   // Excel Report generation functions - generates one Excel file with all classes (multiple sheets)
@@ -4306,80 +4736,126 @@ export default function WerkstattVerwaltungApp() {
   }
 
   // Drag-and-drop helpers
-  function canAssign(student, workshopName, band) {
-    if (!isWorkshopAvailableInBand(workshops, workshopName, band)) {
-      return { ok: false, reason: `Diese Werkstatt ist in ${getBandLabel(band)} nicht verfügbar.` };
-    }
-    if (activeTrimesterPlan?.courses[workshopName]?.enabled === false) {
-      return { ok: false, reason: 'Kurs ist in diesem Trimester nicht angeboten.' };
-    }
-    if (activeTrimesterPlan && !isWorkshopOfferedInBand(activeTrimesterPlan, workshopName, band)) {
-      return { ok: false, reason: `Kurs ist in ${getBandLabel(band)} für dieses Trimester nicht verfügbar.` };
-    }
-    
-    for (const otherBandId of activeBandIds) {
-      if (otherBandId === band) continue;
-      const otherBandAssignment = dragAssignments[otherBandId]?.[student];
-      if (!otherBandAssignment || isNotAssigned(otherBandAssignment)) continue;
+  function workshopsTakenBeforeThisTrimester(student) {
+    const names = new Set();
+    const remember = (value) => {
+      if (Array.isArray(value)) {
+        value.forEach(remember);
+        return;
+      }
+      if (value && !isNotAssigned(value)) names.add(String(value));
+    };
+    remember(prevAssignments[student]);
+    const currentKey = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+    Object.keys(confirmedAssignments || {}).forEach(key => {
+      if (compareSlotKeys(key, currentKey) >= 0) return;
+      coursesAssignedToStudent(confirmedAssignments[key], student).forEach(name => names.add(name));
+    });
+    return names;
+  }
 
-      if (otherBandAssignment === workshopName && !courseAllowsSelfParallel(workshopName, allowSelfParallel)) {
-        return { ok: false, reason: `Nicht parallel zu sich selbst: bereits in ${getBandLabel(otherBandId)} zugeordnet.` };
-      }
-
-      const otherBandCannotBeParallel = cannotBeParallel[otherBandAssignment] || [];
-      if (otherBandCannotBeParallel.includes(workshopName)) {
-        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${getBandLabel(otherBandId)}) belegt werden.` };
-      }
-      const thisWorkshopCannotBeParallel = cannotBeParallel[workshopName] || [];
-      if (thisWorkshopCannotBeParallel.includes(otherBandAssignment)) {
-        return { ok: false, reason: `Kann nicht parallel zu ${otherBandAssignment} (${getBandLabel(otherBandId)}) belegt werden.` };
-      }
-    }
-    
-    const counts = getCurrentWorkshopCounts();
-    const capacity =
-      band === activeBand
-        ? getWahlWorkshopCapacity(workshopName)
-        : getWorkshopCapacity(workshops[workshopName], workshopName);
-    if ((counts[workshopName] ?? 0) >= capacity) {
-      return { ok: false, reason: `Kapazität erreicht (${counts[workshopName]}/${capacity})` };
-    }
+  function tookWorkshopPreviousSchoolYear(student, workshopName) {
+    const previousStart = yearTrimester.schoolYearStart - 1;
+    const fromHistory = Object.keys(confirmedAssignments || {}).some(key => {
+      const parsed = parseSchoolYearKey(key);
+      if (!parsed || parsed.schoolYearStart !== previousStart) return false;
+      return coursesAssignedToStudent(confirmedAssignments[key], student).includes(workshopName);
+    });
+    if (fromHistory) return 'history';
     const last = prevAssignments[student];
-    if (last && last === workshopName) {
-      return { ok: false, reason: `Schüler hatte diese Werkstatt bereits letztes Jahr (${last}).` };
-    }
-    if (!hasPrereqs(student, workshopName, prevAssignments, prereqs)) {
-      return { ok: false, reason: `Voraussetzungen für ${workshopName} nicht erfüllt.` };
-    }
+    if (Array.isArray(last) ? last.includes(workshopName) : last === workshopName) return 'previous';
+    return null;
+  }
 
-    const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, band, studentClasses, studentEnrollmentYears);
-    if (requiredFolgekurs) {
-      const isFulfilled = isFolgekursFulfilled(requiredFolgekurs, dragAssignments, student, activeBandIds);
-      if (requiredFolgekurs.band !== null) {
-        if (requiredFolgekurs.band === band) {
-          if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
-            const prevKey = getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-            return { 
-              ok: false, 
-              reason: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${prevKey} einen Kurs belegt, der diese Regel auslöst).` 
-            };
-          }
-        } else if (workshopName === requiredFolgekurs.course) {
-          return { 
-            ok: false, 
-            reason: `Folgekurs-Regel: ${requiredFolgekurs.course} muss im ${getBandLabel(requiredFolgekurs.band)} belegt werden (gleiches Band wie im vorherigen Trimester erforderlich).` 
-          };
+  function placementNotes(student, workshopName, band, options = {}) {
+    const notes = [];
+    const seated = Boolean(workshopName) && !isNotAssigned(workshopName);
+    const targetBand = band || activeBand;
+
+    if (seated) {
+      if (!isWorkshopAvailableInBand(workshops, workshopName, targetBand)) {
+        notes.push(`Diese Werkstatt ist in ${getBandLabel(targetBand)} nicht verfügbar.`);
+      }
+      if (activeTrimesterPlan?.courses[workshopName]?.enabled === false) {
+        notes.push('Kurs ist in diesem Trimester nicht angeboten.');
+      }
+      if (activeTrimesterPlan && !isWorkshopOfferedInBand(activeTrimesterPlan, workshopName, targetBand)) {
+        notes.push(`Kurs ist in ${getBandLabel(targetBand)} für dieses Trimester nicht verfügbar.`);
+      }
+      if (activeTrimesterPlan) {
+        const stufe = getStudentStufeForPlan(student, activeTrimesterPlan, studentEnrollmentYears, studentClasses);
+        if (stufe != null && !getAllowedBandIdsForStudent(activeTrimesterPlan, stufe).includes(targetBand)) {
+          notes.push(`Stufe ${stufe} ist für dieses Band nicht vorgesehen.`);
         }
-      } else if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
-        const prevKey = getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-        return { 
-          ok: false, 
-          reason: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${prevKey} einen Kurs belegt, der diese Regel auslöst).` 
-        };
+      }
+
+      for (const otherBandId of activeBandIds) {
+        if (otherBandId === targetBand) continue;
+        const otherBandAssignment = dragAssignments[otherBandId]?.[student];
+        if (!otherBandAssignment || isNotAssigned(otherBandAssignment)) continue;
+        if (otherBandAssignment === workshopName && !courseAllowsSelfParallel(workshopName, allowSelfParallel)) {
+          notes.push(`Nicht parallel zu sich selbst: bereits in ${getBandLabel(otherBandId)} zugeordnet.`);
+        }
+        const blockedByOther = (cannotBeParallel[otherBandAssignment] || []).includes(workshopName);
+        const blockedByThis = (cannotBeParallel[workshopName] || []).includes(otherBandAssignment);
+        if (blockedByOther || blockedByThis) {
+          notes.push(`Kann nicht parallel zu ${otherBandAssignment} (${getBandLabel(otherBandId)}) belegt werden.`);
+        }
+      }
+
+      if (!options.existing) {
+        const counts = getCurrentWorkshopCounts();
+        const capacity = targetBand === activeBand
+          ? getWahlWorkshopCapacity(workshopName)
+          : getWorkshopCapacity(workshops[workshopName], workshopName);
+        const seatedCount = counts[workshopName] ?? 0;
+        if (seatedCount >= capacity) {
+          notes.push(`Kapazität erreicht (${seatedCount}/${capacity})`);
+        }
+      }
+
+      const repeat = tookWorkshopPreviousSchoolYear(student, workshopName);
+      if (repeat === 'history') {
+        const previousStart = yearTrimester.schoolYearStart - 1;
+        notes.push(`Diesen Kurs hatte der Schüler schon im Schuljahr ${previousStart}/${String(previousStart + 1).slice(-2)}.`);
+      } else if (repeat === 'previous') {
+        notes.push('Diesen Kurs hatte der Schüler schon im letzten Jahr.');
+      }
+      const missingPrereqs = (prereqs[workshopName] || []).filter(req => !workshopsTakenBeforeThisTrimester(student).has(req));
+      if (missingPrereqs.length) {
+        notes.push(`Voraussetzung fehlt: ${missingPrereqs.join(', ')}.`);
       }
     }
 
-    return { ok: true, reason: null };
+    listRequiredFolgekurse(
+      student, rules, confirmedAssignments,
+      yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester,
+      targetBand, studentClasses, studentEnrollmentYears
+    ).forEach(required => {
+      if (isFolgekursFulfilled(required, dragAssignments, student, activeBandIds)) return;
+      if (required.band != null && targetBand === required.band && workshopName !== required.course) {
+        notes.push(`Nach ${required.fromCourse} im vorigen Trimester muss in diesem Band ${required.course} belegt werden.`);
+      } else if (required.band != null && workshopName === required.course) {
+        notes.push(`${required.course} muss im ${getBandLabel(required.band)} liegen, weil der Kurs dort im vorigen Trimester begann.`);
+      } else if (required.band != null && seated) {
+        notes.push(`In ${getBandLabel(required.band)} fehlt noch der Folgekurs ${required.course}.`);
+      } else if (required.band == null && workshopName !== required.course) {
+        notes.push(`Nach ${required.fromCourse} im vorigen Trimester muss ${required.course} belegt werden.`);
+      }
+    });
+
+    const missingYear = folgekursBlockedByMissingYear(
+      student, rules, confirmedAssignments,
+      yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester,
+      studentClasses, studentEnrollmentYears
+    );
+    if (missingYear) notes.push(missingYear);
+    return notes;
+  }
+
+  function canAssign(student, workshopName, band, options = {}) {
+    const notes = placementNotes(student, workshopName, band, options);
+    return { ok: notes.length === 0, reason: notes[0] || null };
   }
 
   function handleDragStart(e, student) {
@@ -4434,11 +4910,13 @@ export default function WerkstattVerwaltungApp() {
     const student = e.dataTransfer.getData('text/plain');
     if (!student) return;
     
-    const conflictBand = activeBandIds.find(otherBandId => {
-      if (otherBandId === activeBand) return false;
-      const otherAssignment = dragAssignments[otherBandId]?.[student];
-      return otherAssignment === workshopName && !isNotAssigned(workshopName);
-    });
+    const conflictBand = courseAllowsSelfParallel(workshopName, allowSelfParallel)
+      ? null
+      : activeBandIds.find(otherBandId => {
+          if (otherBandId === activeBand) return false;
+          const otherAssignment = dragAssignments[otherBandId]?.[student];
+          return otherAssignment === workshopName && !isNotAssigned(workshopName);
+        });
     if (conflictBand) {
       setDragHover({ 
         workshop: workshopName, 
@@ -4469,19 +4947,17 @@ export default function WerkstattVerwaltungApp() {
     const student = e.dataTransfer.getData('text/plain');
     if (!student) return;
     
-    const conflictBand = activeBandIds.find(otherBandId => {
-      if (otherBandId === activeBand) return false;
-      const otherAssignment = dragAssignments[otherBandId]?.[student];
-      return otherAssignment === workshopName && !isNotAssigned(workshopName);
-    });
+    const conflictBand = courseAllowsSelfParallel(workshopName, allowSelfParallel)
+      ? null
+      : activeBandIds.find(otherBandId => {
+          if (otherBandId === activeBand) return false;
+          const otherAssignment = dragAssignments[otherBandId]?.[student];
+          return otherAssignment === workshopName && !isNotAssigned(workshopName);
+        });
     if (conflictBand) {
       const errorMsg = `Kann nicht zugeordnet werden: ${student} ist bereits in ${getBandLabel(conflictBand)} ${workshopName} zugeordnet.`;
-      setDropViolations(prev => ({ ...prev, [workshopName]: errorMsg }));
-      setTimeout(() => setDropViolations(prev => {
-        const copy = { ...prev };
-        delete copy[workshopName];
-        return copy;
-      }), 5000);
+      setStudentStickyNotes(prev => ({ ...prev, [student]: errorMsg }));
+      setCollapsedStudentNotes(prev => ({ ...prev, [`${activeBand}::${student}`]: false }));
       return;
     }
     
@@ -4647,14 +5123,14 @@ export default function WerkstattVerwaltungApp() {
       }
     }
     
-    // Also show temporary violation message
+    setStudentStickyNotes(prev => {
+      if (!prev[student]) return prev;
+      const next = { ...prev };
+      delete next[student];
+      return next;
+    });
     if (!check.ok) {
-      setDropViolations(prev => ({ ...prev, [workshopName]: check.reason }));
-      setTimeout(() => setDropViolations(prev => {
-        const copy = { ...prev };
-        delete copy[workshopName];
-        return copy;
-      }), 5000);
+      setCollapsedStudentNotes(prev => ({ ...prev, [`${activeBand}::${student}`]: false }));
     }
     
     setDragHover({ workshop: null, invalid: false, message: null });
@@ -5538,6 +6014,66 @@ export default function WerkstattVerwaltungApp() {
   function hasNoVotesForBand(student, band) {
     const choices = getChoicesForBand(band)[student];
     return !Array.isArray(choices) || choices.length === 0;
+  }
+
+  function notesForStudent(student, workshopName) {
+    const notes = [];
+    const sticky = studentStickyNotes[student];
+    const currentCourse = workshopName && !isNotAssigned(workshopName) ? workshopName : '';
+    const staleSelfParallel = sticky
+      && currentCourse
+      && sticky.startsWith('Kann nicht zugeordnet werden:')
+      && sticky.includes(currentCourse)
+      && courseAllowsSelfParallel(currentCourse, allowSelfParallel);
+    if (sticky && !staleSelfParallel) notes.push(sticky);
+    const bandHasVotes = Object.keys(getChoicesForBand(activeBand)).length > 0;
+    if (bandHasVotes && studentExpectedOnBand(student, activeBand) && hasNoVotesForBand(student, activeBand)) {
+      notes.push('Keine Wahlen abgegeben');
+    }
+    placementNotes(student, workshopName, activeBand, { existing: true }).forEach(note => {
+      if (!notes.includes(note)) notes.push(note);
+    });
+    return notes;
+  }
+
+  function renderStudentNotes(student, workshopName) {
+    const notes = notesForStudent(student, workshopName);
+    if (!notes.length) return null;
+    const noteKey = `${activeBand}::${student}`;
+    const collapsed = collapsedStudentNotes[noteKey] === true;
+    const ruleNote = notes.some(note => note !== 'Keine Wahlen abgegeben');
+    return (
+      <div className="mt-1 w-full" onMouseDown={(e) => e.stopPropagation()}>
+        <button
+          type="button"
+          draggable={false}
+          aria-expanded={!collapsed}
+          onClick={(e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            setCollapsedStudentNotes(prev => ({ ...prev, [noteKey]: !collapsed }));
+          }}
+          className={`inline-flex items-center gap-1 rounded px-1 py-0.5 ${ruleNote ? 'text-red-700' : 'text-amber-700'}`}
+          title={collapsed ? 'Hinweis ausklappen' : 'Hinweis einklappen'}
+        >
+          <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fillRule="evenodd" d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 7a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 7zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" />
+          </svg>
+          <svg className={`w-3 h-3 shrink-0 transition-transform ${collapsed ? '' : 'rotate-90'}`} viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+            <path fillRule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clipRule="evenodd" />
+          </svg>
+        </button>
+        {!collapsed && (
+          <div className="mt-1 space-y-1">
+            {notes.map(note => (
+              <div key={note} className={`text-[11px] leading-snug rounded px-1.5 py-1 border ${note === 'Keine Wahlen abgegeben' ? 'text-amber-900 bg-amber-50 border-amber-300' : 'text-red-800 bg-red-50 border-red-300'}`}>
+                {note}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
   }
 
   function studentExpectedOnBand(student, bandId) {
@@ -7017,9 +7553,9 @@ export default function WerkstattVerwaltungApp() {
               const currentCount = getCurrentWorkshopCounts()[w] || 0;
               const capacity = getWahlWorkshopCapacity(w);
               const isHovering = dragHover.workshop === w;
-              const violationMessage = dropViolations[w];
-              const persistentViols = persistentViolations[w] || {};
-              const hasPersistentViolations = Object.keys(persistentViols).length > 0;
+              const placedEntries = Object.entries(getAssignmentsForBand(activeBand))
+                .filter(([, a]) => a === w && a !== undefined && a !== null);
+              const hasPersistentViolations = placedEntries.some(([student]) => notesForStudent(student, w).length > 0);
 
               return (
                 <div
@@ -7063,23 +7599,10 @@ export default function WerkstattVerwaltungApp() {
                     </span>
                   </div>
 
-                  {hasPersistentViolations && (
-                    <div className="mb-2 p-2 bg-red-100 border border-red-300 rounded-lg">
-                      <div className="text-xs font-semibold text-red-800 mb-1">⚠️ Regelverstöße:</div>
-                      <div className="space-y-1">
-                        {Object.entries(persistentViols).map(([student, msg]) => (
-                          <div key={student} className="text-xs text-red-700">
-                            <span className="font-medium">{student}:</span> {msg}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
                   <div className="space-y-1 min-h-[80px]">
-                    {Object.entries(getAssignmentsForBand(activeBand))
-                      .filter(([s, a]) => a === w && a !== undefined && a !== null)
-                      .map(([s]) => (
+                    {placedEntries.map(([s]) => {
+                        const hasRuleNote = notesForStudent(s, w).some(note => note !== 'Keine Wahlen abgegeben');
+                        return (
                         <div
                           key={s}
                           ref={(el) => {
@@ -7094,7 +7617,7 @@ export default function WerkstattVerwaltungApp() {
                           className={`cursor-move px-3 py-2 rounded-lg text-xs flex justify-between items-start shadow-sm flex-col transition-all duration-200 hover:shadow-md ${
                             studentSearchQuery && s.toLowerCase().includes(studentSearchQuery.toLowerCase())
                               ? 'bg-gradient-to-r from-blue-200 to-blue-300 border-2 border-blue-500 shadow-lg ring-2 ring-blue-400'
-                              : persistentViols[s]
+                              : hasRuleNote
                               ? 'bg-gradient-to-r from-red-100 to-orange-100 border border-red-200 hover:from-red-200 hover:to-orange-200'
                               : hasNoVotesForBand(s, activeBand)
                               ? 'bg-gradient-to-r from-yellow-50 to-amber-50 border-2 border-yellow-300 hover:from-yellow-100 hover:to-amber-100'
@@ -7109,7 +7632,7 @@ export default function WerkstattVerwaltungApp() {
                             {studentAssistants[s] && (
                               <div className="ml-1 w-2 h-2 bg-blue-600 rounded-full"></div>
                             )}
-                            {persistentViols[s] && (
+                            {hasRuleNote && (
                               <div className="ml-1 w-2 h-2 bg-red-600 rounded-full"></div>
                             )}
                             {hasNoVotesForBand(s, activeBand) && (
@@ -7121,18 +7644,12 @@ export default function WerkstattVerwaltungApp() {
                               <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs">1. {getChoicesForBand(activeBand)[s][0] || '—'}</span>
                               <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs">2. {getChoicesForBand(activeBand)[s][1] || '—'}</span>
                             </div>
-                          ) : (
-                            <div className="text-xs text-yellow-700 italic mt-1">
-                              ⚠️ Keine Wahlen abgegeben
-                            </div>
-                          )}
+                          ) : null}
+                          {renderStudentNotes(s, w)}
                         </div>
-                      ))}
+                        );
+                      })}
                   </div>
-
-                  {violationMessage && (
-                    <div className="text-xs text-red-600 mt-2">{violationMessage}</div>
-                  )}
                   </div>
                 </div>
               );
@@ -7165,6 +7682,12 @@ export default function WerkstattVerwaltungApp() {
                   });
                 }
                 
+                setStudentStickyNotes(prev => {
+                  if (!prev[student]) return prev;
+                  const next = { ...prev };
+                  delete next[student];
+                  return next;
+                });
                 // Clear all persistent violations for this student
                 setPersistentViolations(prev => {
                   const updated = { ...prev };
@@ -7230,11 +7753,8 @@ export default function WerkstattVerwaltungApp() {
                           <span className="px-1.5 py-0.5 bg-orange-100 rounded text-xs">1. {getChoicesForBand(activeBand)[s][0] || '—'}</span>
                           <span className="px-1.5 py-0.5 bg-orange-100 rounded text-xs">2. {getChoicesForBand(activeBand)[s][1] || '—'}</span>
                         </div>
-                      ) : (
-                        <div className="text-xs text-yellow-700 italic mt-1">
-                          ⚠️ Keine Wahlen abgegeben
-                        </div>
-                      )}
+                      ) : null}
+                      {renderStudentNotes(s, null)}
                     </div>
                   ))}
               </div>
@@ -7409,6 +7929,48 @@ export default function WerkstattVerwaltungApp() {
               <button 
                 onClick={generateExcelClassReports}
                 className="px-4 py-3 bg-gradient-to-r from-blue-500 to-blue-600 text-white font-semibold rounded-lg shadow-sm hover:from-blue-600 hover:to-blue-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Einzelne Klassen
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="md:col-span-2 bg-gradient-to-br from-amber-50 to-orange-100 rounded-xl p-6 shadow-sm border border-amber-200">
+          <h3 className="text-lg font-semibold text-amber-950 mb-3 border-b border-amber-300 pb-2">Belegte Kurse</h3>
+          <p className="text-sm text-amber-900 mb-4">
+            Welche Kurse die Schülerinnen und Schüler in jedem Trimester belegt haben.
+          </p>
+          <ul className="text-xs text-amber-800 mb-4 list-disc list-inside space-y-1">
+            <li>Getrennt nach Schuljahr und Trimester</li>
+            <li>Bis zum letzten Trimester, in dem die Kurse schon eingeteilt sind</li>
+            <li>PDF im Querformat, Kursnamen in der Kursfarbe</li>
+          </ul>
+          <div className="space-y-2">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                onClick={generatePDFAllCourseHistoryReport}
+                className="px-4 py-3 bg-gradient-to-r from-amber-600 to-amber-700 text-white font-semibold rounded-lg shadow-sm hover:from-amber-700 hover:to-amber-800 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📄 PDF: Alle Klassen
+              </button>
+              <button
+                onClick={generateExcelAllCourseHistoryReport}
+                className="px-4 py-3 bg-gradient-to-r from-amber-700 to-orange-700 text-white font-semibold rounded-lg shadow-sm hover:from-amber-800 hover:to-orange-800 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📗 Excel: Alle Klassen
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+              <button
+                onClick={generatePDFCourseHistoryByClass}
+                className="px-4 py-3 bg-gradient-to-r from-amber-500 to-amber-600 text-white font-semibold rounded-lg shadow-sm hover:from-amber-600 hover:to-amber-700 hover:shadow-md transition-all duration-200 text-sm"
+              >
+                📄 PDF: Einzelne Klassen
+              </button>
+              <button
+                onClick={generateExcelCourseHistoryByClass}
+                className="px-4 py-3 bg-gradient-to-r from-amber-600 to-orange-600 text-white font-semibold rounded-lg shadow-sm hover:from-amber-700 hover:to-orange-700 hover:shadow-md transition-all duration-200 text-sm"
               >
                 📗 Excel: Einzelne Klassen
               </button>
