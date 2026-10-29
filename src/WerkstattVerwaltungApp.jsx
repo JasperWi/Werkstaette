@@ -292,19 +292,34 @@ function wrapCourseNames(doc, courses, maxWidth) {
   return lines.length ? lines : [['—']];
 }
 
+function groupTimelineByYear(groups) {
+  const blocks = [];
+  (groups || []).forEach(group => {
+    const current = blocks[blocks.length - 1];
+    if (!current || current.yearLabel !== group.yearLabel) {
+      blocks.push({ yearLabel: group.yearLabel, groups: [group] });
+    } else {
+      current.groups.push(group);
+    }
+  });
+  return blocks;
+}
+
 function layoutStudentTimeline(doc, groups, maxWidth) {
   const courseWidth = Math.max(40, maxWidth - 58);
   if (!groups.length) {
-    return { rows: [], height: 8 };
+    return { rows: [], height: 8, gapBefore: 0 };
   }
   let lastYear = '';
   const rows = groups.map((group, index) => {
+    const yearBreak = index > 0 && group.yearLabel !== lastYear;
     const showYear = group.yearLabel !== lastYear;
     lastYear = group.yearLabel;
     const courseLines = wrapCourseNames(doc, group.courses, courseWidth);
-    const height = Math.max(6.4, courseLines.length * 4.5 + 1.6);
+    const height = Math.max(6.4, courseLines.length * 4.5 + 1.6) + (yearBreak ? 4.2 : 0);
     return {
       showYear,
+      yearBreak,
       yearLabel: group.yearLabel,
       trimesterLabel: group.trimesterLabel,
       courseLines,
@@ -314,7 +329,7 @@ function layoutStudentTimeline(doc, groups, maxWidth) {
     };
   });
   const height = rows.reduce((sum, row) => sum + row.height, 0) + 2;
-  return { rows, height };
+  return { rows, height, gapBefore: 0 };
 }
 
 function drawCourseNameLine(doc, names, x, y, workshopColors) {
@@ -354,14 +369,17 @@ function drawStudentTimeline(doc, layout, x, y, workshopColors) {
   const centers = [];
   let cursor = y + 1.2;
   layout.rows.forEach(row => {
+    if (row.yearBreak) cursor += 4.2;
     centers.push({ y: cursor + 2.2, row });
-    cursor += row.height;
+    cursor += row.height - (row.yearBreak ? 4.2 : 0);
   });
-  if (centers.length > 1) {
-    doc.setDrawColor(217, 119, 6);
-    doc.setLineWidth(0.45);
-    doc.line(spineX, centers[0].y, spineX, centers[centers.length - 1].y);
-  }
+  doc.setDrawColor(217, 119, 6);
+  doc.setLineWidth(0.45);
+  centers.forEach((point, index) => {
+    const previous = centers[index - 1];
+    if (!previous || point.row.yearBreak) return;
+    doc.line(spineX, previous.y, spineX, point.y);
+  });
   centers.forEach(({ y: dotY, row }) => {
     if (row.showYear) {
       doc.setFont('helvetica', 'bold');
@@ -3752,36 +3770,91 @@ export default function WerkstattVerwaltungApp() {
     yPos += 10;
 
     sections.forEach((section, sectionIndex) => {
-      checkPageBreak(32);
+      const entries = [];
+      section.rows.forEach(row => {
+        const blocks = groupTimelineByYear(row.groups);
+        if (!blocks.length) {
+          entries.push({ student: row.student, className: row.className, groups: [], continues: false });
+          return;
+        }
+        blocks.forEach((block, index) => {
+          entries.push({
+            student: row.student,
+            className: row.className,
+            groups: block.groups,
+            continues: index > 0,
+          });
+        });
+      });
+      const lineCache = entries.map(entry => layoutStudentTimeline(doc, entry.groups, courseColWidth - 4));
+      const firstBlockHeight = (lineCache[0]?.height || 12) + 22;
+      if (yPos + firstBlockHeight > pageHeight - 14) {
+        doc.addPage();
+        yPos = 16;
+      }
       doc.setFont('helvetica', 'bold');
       doc.setFontSize(14);
       doc.setTextColor(15, 23, 42);
       doc.text(`Klasse ${section.className}`, margin, yPos);
-      yPos += 3;
-      const lineCache = section.rows.map(row => layoutStudentTimeline(doc, row.groups, courseColWidth - 4));
+      yPos += 6;
+      let lastBodyPage = 0;
+      let repeatIdentity = false;
       autoTable(doc, {
         startY: yPos,
         head: [['Schüler', 'Klasse', 'Kurse nach Trimester']],
-        body: section.rows.map(row => [row.student, row.className, '']),
+        body: entries.map(entry => [
+          entry.continues ? '' : entry.student,
+          entry.continues ? '' : entry.className,
+          '',
+        ]),
         theme: 'plain',
+        showHead: 'everyPage',
+        rowPageBreak: 'avoid',
+        pageBreak: 'auto',
         headStyles: { fillColor: [180, 83, 9], textColor: 255, fontStyle: 'bold' },
-        styles: { fontSize: 8, cellPadding: 1.8, textColor: [15, 23, 42], font: 'helvetica', lineColor: [226, 232, 240], lineWidth: 0.1 },
+        styles: { fontSize: 8, cellPadding: 1.8, textColor: [15, 23, 42], font: 'helvetica', lineColor: [226, 232, 240], lineWidth: 0.1, overflow: 'linebreak' },
         columnStyles: {
           0: { cellWidth: studentWidth, fontStyle: 'bold', valign: 'top' },
           1: { cellWidth: classWidth, valign: 'top' },
           2: { cellWidth: courseColWidth, valign: 'top' },
         },
-        margin: { left: margin, right: margin },
+        margin: { top: 14, left: margin, right: margin, bottom: 14 },
         didParseCell(data) {
-          if (data.section !== 'body' || data.column.index !== 2) return;
+          if (data.section !== 'body') return;
+          const entry = entries[data.row.index];
           const layout = lineCache[data.row.index] || { height: 8 };
-          data.cell.text = [''];
-          data.cell.styles.minCellHeight = Math.max(8, layout.height + 2);
+          const yearGap = entry?.continues ? 4.2 : 0;
+          data.cell.styles.cellPadding = { top: 1.8 + yearGap, right: 1.8, bottom: 1.6, left: 1.8 };
+          data.cell.styles.minCellHeight = Math.max(8, layout.height + 2 + yearGap);
+          if (data.column.index === 2) data.cell.text = [''];
         },
         didDrawCell(data) {
-          if (data.section !== 'body' || data.column.index !== 2) return;
+          if (data.section !== 'body') return;
+          const entry = entries[data.row.index];
+          const yearGap = entry?.continues ? 4.2 : 0;
+          if (data.column.index === 0) {
+            const startsPage = data.pageNumber !== lastBodyPage;
+            lastBodyPage = data.pageNumber;
+            repeatIdentity = Boolean(entry?.continues && startsPage);
+            if (repeatIdentity) {
+              doc.setFont('helvetica', 'bold');
+              doc.setFontSize(8);
+              doc.setTextColor(15, 23, 42);
+              const nameLines = doc.splitTextToSize(entry.student, studentWidth - 4);
+              doc.text(nameLines, data.cell.x + 1.8, data.cell.y + yearGap + 5);
+            }
+            return;
+          }
+          if (data.column.index === 1 && repeatIdentity && entry) {
+            doc.setFont('helvetica', 'normal');
+            doc.setFontSize(8);
+            doc.setTextColor(15, 23, 42);
+            doc.text(entry.className, data.cell.x + 1.8, data.cell.y + yearGap + 5);
+            return;
+          }
+          if (data.column.index !== 2) return;
           const layout = lineCache[data.row.index] || { rows: [], height: 8 };
-          drawStudentTimeline(doc, layout, data.cell.x + 1.5, data.cell.y + 1.2, workshopColors);
+          drawStudentTimeline(doc, layout, data.cell.x + 1.5, data.cell.y + 1.2 + yearGap, workshopColors);
         },
       });
       yPos = doc.lastAutoTable.finalY + 10;
