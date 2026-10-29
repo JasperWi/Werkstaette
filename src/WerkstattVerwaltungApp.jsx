@@ -3039,7 +3039,6 @@ export default function WerkstattVerwaltungApp() {
   const [dragHover, setDragHover] = useState({ workshop: null, invalid: false, message: null });
   const [studentStickyNotes, setStudentStickyNotes] = useState({});
   const [collapsedStudentNotes, setCollapsedStudentNotes] = useState({});
-  const [persistentViolations, setPersistentViolations] = useState({}); // { workshopName: { studentName: message } }
   const scrollContainerRef = React.useRef(null);
   const topScrollbarRef = React.useRef(null);
   const [windowWidth, setWindowWidth] = useState(window.innerWidth);
@@ -4962,166 +4961,6 @@ export default function WerkstattVerwaltungApp() {
     }
     
     const check = canAssign(student, workshopName, activeBand);
-    
-    // Get previous assignment to clear violations from old workshop
-    const previousAssignment = getAssignmentsForBand(activeBand)[student];
-    
-    // Always perform assignment, even if rules are broken
-    // (State update is now handled at the end of the function with auto-save)
-    
-    // Clear violations from previous workshop
-    if (previousAssignment && previousAssignment !== workshopName) {
-      setPersistentViolations(prev => {
-        const updated = { ...prev };
-        if (updated[previousAssignment] && updated[previousAssignment][student]) {
-          const copy = { ...updated[previousAssignment] };
-          delete copy[student];
-          if (Object.keys(copy).length === 0) {
-            delete updated[previousAssignment];
-          } else {
-            updated[previousAssignment] = copy;
-          }
-        }
-        return updated;
-      });
-    }
-    
-    // Track violations persistently for new assignment
-    if (!check.ok) {
-      setPersistentViolations(prev => ({
-      ...prev, 
-        [workshopName]: {
-          ...prev[workshopName],
-          [student]: check.reason
-        }
-      }));
-    } else {
-      // Also check for Folgekurs rule violations even if other checks pass
-      const requiredFolgekurs = getRequiredFolgekurs(student, rules, confirmedAssignments, yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, activeBand, studentClasses, studentEnrollmentYears);
-      if (requiredFolgekurs) {
-        // Check if the rule is already fulfilled in the current assignments (after this drop)
-        const updatedAssignments = { ...dragAssignments };
-        updatedAssignments[activeBand] = { ...updatedAssignments[activeBand], [student]: workshopName };
-        const erstesBandAssignment = updatedAssignments.erstesBand?.[student];
-        const zweitesBandAssignment = updatedAssignments.zweitesBand?.[student];
-        
-        // Check if rule is already fulfilled
-        let isFulfilled = false;
-        
-        if (requiredFolgekurs.band !== null) {
-          // sameBand is required - check only the same band
-          if (requiredFolgekurs.band === 'erstesBand' && erstesBandAssignment === requiredFolgekurs.course) {
-            isFulfilled = true;
-          } else if (requiredFolgekurs.band === 'zweitesBand' && zweitesBandAssignment === requiredFolgekurs.course) {
-            isFulfilled = true;
-          }
-          
-          // Check if we're in the required band
-          if (requiredFolgekurs.band === activeBand) {
-            // This is the band where the rule applies
-            if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
-              setPersistentViolations(prev => ({
-                ...prev,
-                [workshopName]: {
-                  ...(prev[workshopName] || {}),
-                  [student]: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)} einen Kurs belegt, der diese Regel auslöst).`
-                }
-              }));
-            } else if (requiredFolgekurs.course === workshopName) {
-              // Clear violation for this student if assignment is now valid
-              setPersistentViolations(prev => {
-                const updated = { ...prev };
-                if (updated[workshopName]) {
-                  const copy = { ...updated[workshopName] };
-                  delete copy[student];
-                  if (Object.keys(copy).length === 0) {
-                    delete updated[workshopName];
-                  } else {
-                    updated[workshopName] = copy;
-                  }
-                }
-                return updated;
-              });
-            }
-          } else {
-            // This is NOT the required band
-            // If student is trying to assign the required course here, that's wrong
-            if (workshopName === requiredFolgekurs.course) {
-              setPersistentViolations(prev => ({
-                ...prev,
-                [workshopName]: {
-                  ...(prev[workshopName] || {}),
-                  [student]: `Folgekurs-Regel: ${requiredFolgekurs.course} muss im ${requiredFolgekurs.band === 'erstesBand' ? 'Ersten' : 'Zweiten'} Band belegt werden (gleiches Band wie im vorherigen Trimester erforderlich).`
-                }
-              }));
-            }
-          }
-        } else {
-          // sameBand is not required - check both bands
-          if (erstesBandAssignment === requiredFolgekurs.course || zweitesBandAssignment === requiredFolgekurs.course) {
-            isFulfilled = true;
-          }
-          
-          // Only show warning if rule is not fulfilled and student is trying to assign something else
-          if (!isFulfilled && requiredFolgekurs.course !== workshopName) {
-            setPersistentViolations(prev => ({
-              ...prev,
-              [workshopName]: {
-                ...(prev[workshopName] || {}),
-                  [student]: `Folgekurs-Regel: Schüler muss ${requiredFolgekurs.course} belegen (hat im vorherigen Trimester ${getPreviousTrimesterKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)} einen Kurs belegt, der diese Regel auslöst).`
-              }
-            }));
-          } else if (requiredFolgekurs.course === workshopName) {
-            // Clear violation for this student if assignment is now valid
-            setPersistentViolations(prev => {
-              const updated = { ...prev };
-              if (updated[workshopName]) {
-                const copy = { ...updated[workshopName] };
-                delete copy[student];
-                if (Object.keys(copy).length === 0) {
-                  delete updated[workshopName];
-                } else {
-                  updated[workshopName] = copy;
-                }
-              }
-              return updated;
-            });
-          }
-        }
-        
-        if (isFulfilled) {
-          // Rule is fulfilled, clear any violations
-          setPersistentViolations(prev => {
-            const updated = { ...prev };
-            if (updated[workshopName]) {
-              const copy = { ...updated[workshopName] };
-              delete copy[student];
-              if (Object.keys(copy).length === 0) {
-                delete updated[workshopName];
-              } else {
-                updated[workshopName] = copy;
-              }
-            }
-            return updated;
-          });
-        }
-      } else {
-        // Clear violation for this student if assignment is now valid
-        setPersistentViolations(prev => {
-          const updated = { ...prev };
-          if (updated[workshopName]) {
-            const copy = { ...updated[workshopName] };
-            delete copy[student];
-            if (Object.keys(copy).length === 0) {
-              delete updated[workshopName];
-            } else {
-              updated[workshopName] = copy;
-            }
-          }
-          return updated;
-        });
-      }
-    }
     
     setStudentStickyNotes(prev => {
       if (!prev[student]) return prev;
@@ -7687,22 +7526,6 @@ export default function WerkstattVerwaltungApp() {
                   const next = { ...prev };
                   delete next[student];
                   return next;
-                });
-                // Clear all persistent violations for this student
-                setPersistentViolations(prev => {
-                  const updated = { ...prev };
-                  Object.keys(updated).forEach(workshopName => {
-                    if (updated[workshopName] && updated[workshopName][student]) {
-                      const copy = { ...updated[workshopName] };
-                      delete copy[student];
-                      if (Object.keys(copy).length === 0) {
-                        delete updated[workshopName];
-                      } else {
-                        updated[workshopName] = copy;
-                      }
-                    }
-                  });
-                  return updated;
                 });
               }}
             >
