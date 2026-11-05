@@ -42,12 +42,3 @@ Jede Werkstatt hat Farbe, Kapazität, Lehrkraft und Raum. Läuft sie in mehreren
 Oben rechts liegt der Export und der Import als ZIP. Ein Wahl-Upload ändert einen gesetzten Jahrgang nicht. Ersetzt ein ZIP auf diesem Weg alle Daten, werden fehlende Einschulungsjahre aus dem letzten Trimester mit Klasse ergänzt.
 
 Zum Ausprobieren liegen zwei Beispieldateien unter `scripts/output/`: die kleinere `werkstatt-demo.zip` und `werkstatt-demo-10-jahre.zip` über zehn Schuljahre.
-
-## Starten
-
-```bash
-npm install
-npm start
-```
-
-Die App öffnet sich unter [http://localhost:3000](http://localhost:3000).
