@@ -42,3 +42,15 @@ Jede Werkstatt hat Farbe, Kapazität, Lehrkraft und Raum. Läuft sie in mehreren
 Oben rechts liegt der Export und der Import als ZIP. Ein Wahl-Upload ändert einen gesetzten Jahrgang nicht. Ersetzt ein ZIP auf diesem Weg alle Daten, werden fehlende Einschulungsjahre aus dem letzten Trimester mit Klasse ergänzt.
 
 Zum Ausprobieren liegen zwei Beispieldateien unter `scripts/output/`: die kleinere `werkstatt-demo.zip` und `werkstatt-demo-10-jahre.zip` über zehn Schuljahre.
+
+## Veröffentlichen
+
+Die Live-Seite kommt vom Branch `gh-pages`. Nach Änderungen lokal:
+
+```bash
+npm run deploy
+```
+
+Das baut die App und schiebt `build/` auf `gh-pages`. Unter **Repository → Settings → Pages** muss die Quelle **Deploy from branch**, Branch `gh-pages`, Pfad `/` sein.
+
+Der Workflow „Deploy to GitHub Pages“ in Actions startet derzeit nur per Hand (`workflow_dispatch`). Läuft er nicht, steht oft: *account is locked due to a billing issue* — das betrifft GitHub Billing, nicht den Code. Bis das geklärt ist, weiter mit `npm run deploy` veröffentlichen.

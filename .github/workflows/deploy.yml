@@ -1,10 +1,9 @@
 name: Deploy to GitHub Pages
 
+# Pages publishes from branch `gh-pages` (see `npm run deploy` in README).
+# Push trigger is off while GitHub Actions cannot start (account billing lock).
+# Re-enable `push` to main/master after billing is fixed, or run this manually.
 on:
-  push:
-    branches:
-      - main
-      - master
   workflow_dispatch:
 
 permissions:
