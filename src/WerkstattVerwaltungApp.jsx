@@ -1092,7 +1092,7 @@ async function exportAllDataAsZIP(allData) {
             const wishHeaders = Array.from({ length: maxWishes }, (_, i) => `Wahl ${i + 1}`);
             bandData.push(['Student', 'Klasse', ...wishHeaders]);
             Object.entries(choicesData[bandId] || {}).forEach(([student, choices]) => {
-              if (Array.isArray(choices) && choices.length > 0) {
+            if (Array.isArray(choices) && choices.length > 0) {
                 const row = [student, choicesData.__classes?.[bandId]?.[student] || ''];
                 for (let w = 0; w < maxWishes; w += 1) row.push(choices[w] || '');
                 bandData.push(row);
@@ -1514,9 +1514,9 @@ async function importDataFromZIP(file) {
             const choices = choiceIdxs
               .map(index => csvCell(row[index]))
               .filter(Boolean);
-            if (choices.length > 0) {
-              importedData[choicesKey][band][student] = choices;
-            }
+              if (choices.length > 0) {
+                importedData[choicesKey][band][student] = choices;
+              }
             const className = classIdx >= 0 ? csvCell(row[classIdx]) : '';
             if (className) {
               importedData[choicesKey].__classes[band][student] = className;
@@ -2192,18 +2192,18 @@ function autoAssignOneBandWithPrior(
   const sortedStudents = sortStudentsByPriority(students, studentPriorityScores);
   const modifiedChoices = buildModifiedChoicesForBand(choicesMapFull, bandId, priorWorkshopsByStudent, cannotBeParallel, allowSelfParallel);
   const bandResult = autoAssignSingleBand(
-    sortedStudents,
-    workshops,
-    prevAssignments,
-    prereqs,
+    sortedStudents, 
+    workshops, 
+    prevAssignments, 
+    prereqs, 
     modifiedChoices,
-    studentAssistants,
-    studentPriorityScores,
-    rules,
-    confirmedAssignments,
-    schoolYearStart,
-    schoolYearEnd,
-    currentTrimester,
+    studentAssistants, 
+    studentPriorityScores, 
+    rules, 
+    confirmedAssignments, 
+    schoolYearStart, 
+    schoolYearEnd, 
+    currentTrimester, 
     bandId,
     studentClasses,
     studentEnrollmentYears,
@@ -2238,17 +2238,17 @@ function autoAssignAllBands(students, workshops, prevAssignments, prereqs, choic
 
     const { bandResult, problems } = autoAssignOneBandWithPrior(
       students,
-      workshops,
-      prevAssignments,
-      prereqs,
+    workshops, 
+    prevAssignments, 
+    prereqs, 
       choicesMap,
-      studentAssistants,
-      studentPriorityScores,
-      rules,
-      confirmedAssignments,
-      schoolYearStart,
-      schoolYearEnd,
-      currentTrimester,
+    studentAssistants, 
+    studentPriorityScores, 
+    rules, 
+    confirmedAssignments, 
+    schoolYearStart, 
+    schoolYearEnd, 
+    currentTrimester, 
       cannotBeParallel,
       bandId,
       priorWorkshopsByStudent,
@@ -2485,7 +2485,7 @@ function autoAssignSingleBand(students, workshops, prevAssignments, prereqs, cho
 
   // Further passes: 2nd, 3rd, … choice for students still unassigned
   for (let rank = 1; rank < maxWahl; rank++) {
-    for (const s of students) {
+  for (const s of students) {
       if (s in assignments) continue;
       const ch = workingChoicesMap[s] || [];
       if (ch.length > rank) {
@@ -3191,10 +3191,10 @@ export default function WerkstattVerwaltungApp() {
         reader.readAsArrayBuffer(file);
       } else {
         // CSV file
-        const reader = new FileReader();
-        reader.onload = (e) => {
-          try {
-            const text = e.target.result;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const text = e.target.result;
             if (text.includes('\uFFFD')) {
               // Try reading as windows-1252 if UTF-8 resulted in invalid replacement characters
               const altReader = new FileReader();
@@ -3203,8 +3203,8 @@ export default function WerkstattVerwaltungApp() {
               };
               altReader.onerror = () => resolve(parseCsvText(text));
               altReader.readAsText(file, 'windows-1252');
-              return;
-            }
+          return;
+        }
             resolve(parseCsvText(text));
           } catch (error) {
             reject(error);
@@ -3368,8 +3368,8 @@ export default function WerkstattVerwaltungApp() {
     }
     if (q1Idx === -1) {
       alert('Fehler: Bitte ordnen Sie mindestens eine Spalte für den 1. Wunsch (Q1) zu.');
-      return;
-    }
+        return;
+      }
 
     const wahlCount = activeTrimesterWahlCount;
     if (wahlCount >= 2 && q2Idx === -1) {
@@ -3378,27 +3378,27 @@ export default function WerkstattVerwaltungApp() {
     }
     if (wahlCount >= 3 && q3Idx === -1) {
       alert(`Für dieses Trimester sind ${wahlCount} Wahlen pro Schüler vorgesehen. Bitte ordnen Sie auch eine Spalte für den 3. Wunsch (Q3) zu.`);
-      return;
-    }
+          return;
+        }
 
-    const summary = {
-      newStudents: [],
-      updatedClasses: [],
-      newWorkshops: [],
-      updatedChoices: 0,
-      errors: [],
+        const summary = {
+          newStudents: [],
+          updatedClasses: [],
+          newWorkshops: [],
+          updatedChoices: 0,
+        errors: [],
       band: getBandLabel(targetBand),
-    };
+        };
 
     const trimesterKey = getSchoolYearKey(
       yearTrimester.schoolYearStart,
       yearTrimester.schoolYearEnd,
       yearTrimester.trimester
     );
-    const newStudentClasses = { ...studentClasses };
+        const newStudentClasses = { ...studentClasses };
     const newClassUploadInfo = { ...studentClassUploadInfo };
-    const newStudents = [...students];
-    const newWorkshops = { ...workshops };
+        const newStudents = [...students];
+        const newWorkshops = { ...workshops };
     const newStudentAssistants = { ...studentAssistants };
     const bandMap = { ...(uploadedChoices[targetBand] || {}) };
     const bandClasses = { ...(uploadedChoices.__classes?.[targetBand] || {}) };
@@ -3415,9 +3415,9 @@ export default function WerkstattVerwaltungApp() {
         const ln = String(row[lastNameIdx] || '').trim();
         studentName = `${fn} ${ln}`.trim();
       }
-      if (!studentName) continue;
+          if (!studentName) continue;
 
-      const className = klasseIdx >= 0 ? String(row[klasseIdx] || '').trim() : '';
+        const className = klasseIdx >= 0 ? String(row[klasseIdx] || '').trim() : '';
       const q1Value = q1Idx >= 0 ? String(row[q1Idx] || '').trim() : '';
       const q2Value = q2Idx >= 0 ? String(row[q2Idx] || '').trim() : '';
       const q3Value = q3Idx >= 0 ? String(row[q3Idx] || '').trim() : '';
@@ -3437,30 +3437,30 @@ export default function WerkstattVerwaltungApp() {
         }
       }
 
-      const q1 = parseChoiceValue(q1Value);
-      const q2 = parseChoiceValue(q2Value);
+        const q1 = parseChoiceValue(q1Value);
+        const q2 = parseChoiceValue(q2Value);
       const q3 = parseChoiceValue(q3Value);
 
       if (!newStudents.includes(studentName)) {
-        newStudents.push(studentName);
-        summary.newStudents.push(studentName);
-      }
+            newStudents.push(studentName);
+            summary.newStudents.push(studentName);
+          }
 
       const recordedClass = className || newStudentClasses[studentName] || '';
       if (className) {
         if (newStudentClasses[studentName] !== className) {
-          const oldClass = newStudentClasses[studentName];
-          newStudentClasses[studentName] = className;
+            const oldClass = newStudentClasses[studentName];
+            newStudentClasses[studentName] = className;
           summary.updatedClasses.push({ student: studentName, old: oldClass || null, new: className });
-        }
-      }
+            }
+          }
       if (recordedClass) {
         bandClasses[studentName] = recordedClass;
         rememberClassOnUpload(newClassUploadInfo, studentName, trimesterKey, targetBand, recordedClass);
       }
 
-      const choices = [];
-      if (q1) choices.push(q1);
+        const choices = [];
+        if (q1) choices.push(q1);
       if (wahlCount >= 2 && q2) choices.push(q2);
       if (wahlCount >= 3 && q3) choices.push(q3);
 
@@ -3481,41 +3481,41 @@ export default function WerkstattVerwaltungApp() {
         })
         .filter(Boolean)
         .slice(0, wahlCount);
+          
+        if (normalizedChoices.length > 0) {
+          bandMap[studentName] = normalizedChoices;
+            summary.updatedChoices++;
+          }
+        }
 
-      if (normalizedChoices.length > 0) {
-        bandMap[studentName] = normalizedChoices;
-        summary.updatedChoices++;
-      }
-    }
-
-    setStudents(newStudents);
+        setStudents(newStudents);
     setStudentClasses(newStudentClasses);
     setStudentClassUploadInfo(newClassUploadInfo);
-    setWorkshops(newWorkshops);
+        setWorkshops(newWorkshops);
     if (assistantIdx >= 0) {
       setStudentAssistants(newStudentAssistants);
     }
     setUploadedChoices((prev) => {
-      const updated = {
-        ...prev,
+        const updated = {
+          ...prev,
         [targetBand]: bandMap,
         __classes: {
           ...(prev.__classes || {}),
           [targetBand]: bandClasses,
         },
       };
-      const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
-      const choicesKey = `wv_choices_${key}`;
-      try {
-        localStorage.setItem(choicesKey, JSON.stringify(updated));
-        console.log(`💾 Saved choices to ${choicesKey}:`, updated);
-      } catch (error) {
-        console.error(`Failed to save choices to ${choicesKey}:`, error);
-      }
-      return updated;
-    });
+        const key = getSchoolYearKey(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester);
+        const choicesKey = `wv_choices_${key}`;
+        try {
+          localStorage.setItem(choicesKey, JSON.stringify(updated));
+          console.log(`💾 Saved choices to ${choicesKey}:`, updated);
+        } catch (error) {
+          console.error(`Failed to save choices to ${choicesKey}:`, error);
+        }
+        return updated;
+      });
 
-    setUploadSummary(summary);
+        setUploadSummary(summary);
     setColumnMappingModal((prev) => ({ ...prev, isOpen: false }));
 
     if (fileInputRefs.current[targetBand]) {
@@ -4491,14 +4491,14 @@ export default function WerkstattVerwaltungApp() {
           doc.setFont(undefined, 'bold');
           doc.text(`${getBandLabel(bandId)}:`, 20, yPos);
           yPos += 8;
-
+          
           const bandTableData = bandStudents.map(student => {
             const className = studentClasses[student] || 'Unbekannt';
             const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
             const comment = studentComments[student] || '';
             return [student, className, comment, needsAssistant];
           });
-
+          
           autoTable(doc, {
             startY: yPos,
             head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
@@ -4514,7 +4514,7 @@ export default function WerkstattVerwaltungApp() {
             },
             margin: { left: 15, right: 15 }
           });
-
+          
           yPos = doc.lastAutoTable.finalY + 15;
         });
       } else {
@@ -4614,14 +4614,14 @@ export default function WerkstattVerwaltungApp() {
           doc.setFont(undefined, 'bold');
           doc.text(`${getBandLabel(bandId)}:`, 20, yPos);
           yPos += 8;
-
+          
           const bandTableData = bandStudents.map(student => {
             const className = studentClasses[student] || 'Unbekannt';
             const needsAssistant = studentAssistants[student] ? 'Ja' : 'Nein';
             const comment = studentComments[student] || '';
             return [student, className, comment, needsAssistant];
           });
-
+          
           autoTable(doc, {
             startY: yPos,
             head: [['Schüler', 'Klasse', 'Bemerkung', 'Lernbegleitung']],
@@ -4637,7 +4637,7 @@ export default function WerkstattVerwaltungApp() {
             },
             margin: { left: 15, right: 15 }
           });
-
+          
           yPos = doc.lastAutoTable.finalY + 15;
         });
       } else {
@@ -4752,7 +4752,7 @@ export default function WerkstattVerwaltungApp() {
       if (importedData.assignments) {
         setConfirmedAssignments(importedData.assignments);
       }
-
+      
       // Import choices for all trimesters (stored with pattern wv_choices_${key})
       Object.keys(importedData).forEach(key => {
         if (key.startsWith('wv_choices_')) {
@@ -4762,7 +4762,7 @@ export default function WerkstattVerwaltungApp() {
           }
         }
       });
-
+      
       const importedWorkshops = importedData[LS_KEYS.workshops] || workshops;
       const importedRegistry = importedData[LS_KEYS.classRegistry] || classRegistry;
       const importedPool = mergeKlassenStufenPool(
@@ -5103,7 +5103,7 @@ export default function WerkstattVerwaltungApp() {
   }
   
   const [activeWorkshopEditor, setActiveWorkshopEditor] = useState(null);
-
+  
   function addWorkshop(name, cap) {
     if (!name) return;
     setWorkshops(prev => ({
@@ -5161,8 +5161,8 @@ export default function WerkstattVerwaltungApp() {
         const bandIds = getPayloadBandIds(payload);
         for (const bandId of bandIds) {
           if (Object.values(payload.assignments[bandId] || {}).includes(workshopName)) {
-            return true;
-          }
+          return true;
+        }
         }
         if (isLegacySingleBandAssignments(payload.assignments)) {
           if (Object.values(payload.assignments).includes(workshopName)) {
@@ -5181,7 +5181,7 @@ export default function WerkstattVerwaltungApp() {
     }
     for (const bandId of ALL_BAND_IDS) {
       if (Object.values(dragAssignments[bandId] || {}).includes(workshopName)) {
-        return true;
+      return true;
       }
     }
     return false;
@@ -5990,7 +5990,7 @@ export default function WerkstattVerwaltungApp() {
 
   function studentExpectedOnBand(student, bandId) {
     return isStudentExpectedToVoteOnBand(
-      student,
+          student,
       activeTrimesterPlan,
       bandId,
       studentEnrollmentYears,
@@ -6036,7 +6036,7 @@ export default function WerkstattVerwaltungApp() {
       const selfParallel = [];
       const ruleParallel = [];
       const sameFirst = [];
-      students.forEach(student => {
+    students.forEach(student => {
         const here = dragAssignments[bandId]?.[student];
         const hereChoice = getChoicesForBand(bandId)[student]?.[0];
         activeBandIds.forEach(otherBandId => {
@@ -6079,8 +6079,8 @@ export default function WerkstattVerwaltungApp() {
         const bandAssignments = bandIds.map(bandId =>
           payload.assignments[bandId]?.[student] || 'Nicht Zugeordnet'
         );
-        history.push({
-          slotKey,
+        history.push({ 
+          slotKey, 
           assigned: bandAssignments.join(' / '),
           timestamp: payload.timestamp,
           bandIds,
@@ -6278,12 +6278,12 @@ export default function WerkstattVerwaltungApp() {
                 >
                   Zum Trimester-Management
                 </button>
-              </div>
+                </div>
             ) : (
               <>
-                <div>
+            <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Definiertes Trimester:</label>
-                  <select
+              <select 
                     value={getSchoolYearKey(dialogYearTrimester.schoolYearStart, dialogYearTrimester.schoolYearEnd, dialogYearTrimester.trimester)}
                     onChange={(e) => {
                       const plan = trimesterPlans[e.target.value];
@@ -6301,27 +6301,27 @@ export default function WerkstattVerwaltungApp() {
                         {formatYearTrimester(plan.schoolYearStart, plan.schoolYearEnd, plan.trimester)}
                       </option>
                     ))}
-                  </select>
-                </div>
-                <div className="flex justify-end gap-2 pt-2">
-                  <button
+              </select>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
                     type="button"
-                    onClick={() => setShowTrimesterDialog(false)}
-                    className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
-                  >
-                    Abbrechen
-                  </button>
-                  <button
+                onClick={() => setShowTrimesterDialog(false)}
+                className="px-4 py-2 text-gray-700 bg-gray-100 hover:bg-gray-200 text-sm rounded-lg"
+              >
+                Abbrechen
+              </button>
+              <button
                     type="button"
-                    onClick={() => {
-                      setYearTrimester(dialogYearTrimester);
-                      setShowTrimesterDialog(false);
-                    }}
-                    className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
-                  >
-                    Bestätigen
-                  </button>
-                </div>
+                onClick={() => {
+                  setYearTrimester(dialogYearTrimester);
+                  setShowTrimesterDialog(false);
+                }}
+                className="px-4 py-2 bg-indigo-600 text-white text-sm rounded-lg hover:bg-indigo-700"
+              >
+                Bestätigen
+              </button>
+            </div>
               </>
             )}
           </div>
@@ -6521,7 +6521,7 @@ export default function WerkstattVerwaltungApp() {
                                     </span>
                                   )}
                                 </div>
-                              </div>
+                      </div>
                             </div>
                             <button
                               onClick={(e) => {
@@ -6558,18 +6558,18 @@ export default function WerkstattVerwaltungApp() {
                               {studentAssistants[selectedStudent] && (
                                 <span className="px-2.5 py-0.5 rounded-full bg-blue-100 text-blue-800 font-medium border border-blue-200">
                                   Lernbegleitung
-                                </span>
-                              )}
+                          </span>
+                        )}
                               <span
                                 className="px-2.5 py-0.5 rounded-full bg-gray-100 text-gray-800 font-medium border border-gray-200"
                                 title="Automatisch aus Zuweisungs-Historie berechnet"
                               >
                                 Priorität {priorityScore.toFixed(1)}/10 · {priorityLabel}
                               </span>
-                            </div>
-                          </div>
+                      </div>
+                      </div>
                         );
-                      })()}
+                            })()}
 
                     <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200 space-y-4">
                       <div>
@@ -6580,7 +6580,7 @@ export default function WerkstattVerwaltungApp() {
                           )}
                           {classRegistry.map(cls => {
                             const isActive = studentClasses[selectedStudent] === cls;
-                            return (
+                              return (
                               <button
                                 key={cls}
                                 type="button"
@@ -6642,13 +6642,13 @@ export default function WerkstattVerwaltungApp() {
                               >
                                 Abbrechen
                               </button>
-                            </div>
-                          )}
                         </div>
+                          )}
+                      </div>
                         <p className="text-sm text-gray-700 mt-3 leading-relaxed">
                           {getStudentClassDescription(selectedStudent)}
                         </p>
-                      </div>
+                    </div>
                       <div className="pt-3 border-t border-gray-100">
                         <div className="flex flex-wrap items-center gap-2 mb-1">
                           <label className="text-sm font-medium text-gray-800">Einschulungsjahr</label>
@@ -6682,7 +6682,7 @@ export default function WerkstattVerwaltungApp() {
                         <p className="text-xs text-gray-500 mb-2">
                           Für Belegungs-Regeln nach Einschulungsjahrgang. Ein ZIP auf dem Tab Daten, das alle Daten ersetzt, trägt fehlende Jahrgänge aus dem letzten Trimester mit Klasse ein.
                         </p>
-                        <select
+                      <select 
                           value={studentEnrollmentYears[selectedStudent] ?? ''}
                           onChange={e => updateStudentEnrollmentYear(selectedStudent, e.target.value)}
                           className="w-full max-w-xs px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-green-500"
@@ -6691,7 +6691,7 @@ export default function WerkstattVerwaltungApp() {
                           {getEinschulungsjahrYearOptions().map(y => (
                             <option key={y} value={y}>{y}</option>
                           ))}
-                        </select>
+                      </select>
                       </div>
                       <label className="inline-flex items-center gap-2 cursor-pointer text-sm text-gray-800 pt-2 border-t border-gray-100">
                         <input
@@ -6777,16 +6777,16 @@ export default function WerkstattVerwaltungApp() {
                                         <span className="text-xs text-purple-700 font-medium">Alle Kurse</span>
                                         <div>
                                           <span className="font-medium">{r.name}</span>
-                                          <span className={`ml-2 font-semibold ${hasAll ? 'text-green-700' : 'text-red-700'}`}>
+                                        <span className={`ml-2 font-semibold ${hasAll ? 'text-green-700' : 'text-red-700'}`}>
                                             {hasAll ? 'Erfüllt' : pastZeitraum ? 'Nicht erfüllt (Zeitraum vorbei)' : 'Nicht erfüllt'}
-                                          </span>
-                                        </div>
+                                        </span>
+                                      </div>
                                         <p className="text-xs text-gray-600 mt-1">Alle: {(r.options || []).join(', ')} · {formatRuleZeitraumLabel(r)}</p>
                                         {!hasAll && missing.length > 0 && (
                                           <p className="text-xs text-red-700 mt-1">Offen: {missing.join(', ')}</p>
                                         )}
+                                        </div>
                                       </div>
-                                    </div>
                                   </li>
                                 );
                               }
@@ -6933,19 +6933,19 @@ export default function WerkstattVerwaltungApp() {
                                         {idx + 1}. {choice}
                                       </span>
                                     ))}
-                                  </div>
+                        </div>
                                   {violations.length > 0 ? (
-                                    <ul className="space-y-1">
+                            <ul className="space-y-1">
                                       {violations.map((msg, idx) => (
                                         <li key={idx} className="text-xs p-2 bg-red-50 border border-red-200 rounded text-red-700">{msg}</li>
-                                      ))}
-                                    </ul>
+                              ))}
+                            </ul>
                                   ) : (
                                     <p className="text-xs text-green-700">Keine Auffälligkeiten bei den Wahlen.</p>
                                   )}
                                 </>
-                              )}
-                            </div>
+                            )}
+                          </div>
                           );
                         })}
                       </div>
@@ -7021,16 +7021,16 @@ export default function WerkstattVerwaltungApp() {
         <div className="flex items-center gap-3 min-w-0">
           <div className="flex items-center justify-center w-11 h-11 rounded-full bg-indigo-600 text-white shadow-md flex-shrink-0">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </div>
-          <div>
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              </svg>
+            </div>
+            <div>
             <div className="text-xs text-gray-500 font-medium uppercase tracking-wide">Aktuelles Trimester</div>
             <div className="text-lg font-bold text-gray-900">
-              {formatYearTrimester(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
+                {formatYearTrimester(yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester)}
+              </div>
             </div>
           </div>
-        </div>
         <div className="flex flex-wrap items-center gap-3">
           {activeTrimesterPlan ? (
             <span className="text-sm text-gray-600">
@@ -7101,11 +7101,11 @@ export default function WerkstattVerwaltungApp() {
           </label>
         </div>
 
-        {!Object.keys(getChoicesForBand(activeBand)).length && (
+          {!Object.keys(getChoicesForBand(activeBand)).length && (
           <div className="p-4 bg-gray-50 rounded-lg border border-dashed border-gray-300 text-sm text-gray-600">
             Für {getBandLabel(activeBand)} liegen noch keine Wahldaten vor. Laden Sie eine Datei hoch — bei abweichenden Spaltennamen öffnet sich die Spaltenzuordnung automatisch.
-          </div>
-        )}
+            </div>
+          )}
 
         {uploadSummary && uploadSummary.band === getBandLabel(activeBand) && (
           <div className="bg-blue-50 rounded-lg p-4 border border-blue-200">
@@ -7160,17 +7160,17 @@ export default function WerkstattVerwaltungApp() {
                     {Array.from({ length: activeTrimesterWahlCount }, (_, i) => {
                       const c = choices[i];
                       return (
-                        <span
+                    <span 
                           key={i}
-                          className="px-3 py-1 rounded-lg text-xs shadow-sm font-medium"
-                          style={{
+                      className="px-3 py-1 rounded-lg text-xs shadow-sm font-medium"
+                      style={{
                             backgroundColor: workshopColors[c] ? `${workshopColors[c]}20` : undefined,
                             borderLeft: workshopColors[c] ? `3px solid ${workshopColors[c]}` : undefined,
                             color: workshopColors[c] || undefined,
                           }}
                         >
                           {i + 1}. {c || '—'}
-                        </span>
+                    </span>
                       );
                     })}
                   </div>
@@ -7178,8 +7178,8 @@ export default function WerkstattVerwaltungApp() {
               );
             })}
           </div>
+          </div>
         </div>
-      </div>
 
       {/* Schritt 2: Auto-Zuordnung */}
       <div className="bg-gradient-to-br from-emerald-50 to-teal-50 rounded-xl p-6 shadow-sm border border-emerald-200 flex flex-col">
@@ -7189,24 +7189,24 @@ export default function WerkstattVerwaltungApp() {
           <p className="text-sm text-gray-600 mt-1">
             Berücksichtigt bereits zugeordnete andere Bänder (gleiche Werkstatt / Parallel-Regeln).
           </p>
-        </div>
+            </div>
 
         <div className="space-y-2 mb-4">
-          <button
+            <button 
             type="button"
             onClick={() => runAutoAssignForBand(activeBand)}
             className="w-full px-4 py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold rounded-lg shadow-sm transition-colors"
-          >
+            >
             Auto-Zuordnung: {getBandLabel(activeBand)}
-          </button>
-          <button
+            </button>
+                <button 
             type="button"
             onClick={runAutoAssign}
             className="w-full px-4 py-2.5 bg-white border-2 border-emerald-600 text-emerald-800 hover:bg-emerald-50 text-sm font-semibold rounded-lg transition-colors"
-          >
+                >
             Alle {activeBandCount} Bänder nacheinander zuordnen
-          </button>
-        </div>
+                </button>
+              </div>
 
           {/* Display statistics - use currentStatistics if available, otherwise autoResult */}
           {(hasAnyAssignmentInBands(dragAssignments, activeBandIds) || autoResult) && (
@@ -7234,16 +7234,16 @@ export default function WerkstattVerwaltungApp() {
                           return (
                             <div key={bandId}>
                               <div className="font-semibold">{getBandLabel(bandId)}:</div>
-                              <div className="ml-3">
+                        <div className="ml-3">
                                 {bandStats && bandStats.total > 0 ? (
-                                  <>
+                            <>
                                     <strong>{bandStats.percentFirst.toFixed(2)}%</strong> erste Wahlen ({bandStats.num1} erste, {bandStats.num2} zweite von {bandStats.total} Zuweisungen)
-                                  </>
-                                ) : (
-                                  <>Keine Zuweisungen mit Wahlen</>
-                                )}
-                              </div>
-                            </div>
+                            </>
+                          ) : (
+                            <>Keine Zuweisungen mit Wahlen</>
+                          )}
+                        </div>
+                        </div>
                           );
                         })}
                         <div className="mt-2 p-2 bg-blue-50 rounded border border-blue-200">
@@ -7306,9 +7306,9 @@ export default function WerkstattVerwaltungApp() {
         <div className="flex items-center justify-between mb-4 border-b border-purple-300 pb-2">
           <div>
             <div className="text-xs font-semibold text-purple-700 uppercase tracking-wide">Schritt 3</div>
-            <h3 className="text-lg font-semibold text-purple-900">
+          <h3 className="text-lg font-semibold text-purple-900">
               Manuelle Anpassung — {getBandLabel(activeBand)}
-            </h3>
+          </h3>
           </div>
           {/* Student Search */}
           <div className="flex items-center gap-2">
@@ -7558,10 +7558,10 @@ export default function WerkstattVerwaltungApp() {
                             </div>
                           ) : null}
                           {renderStudentNotes(s, w)}
-                        </div>
+                            </div>
                         );
                       })}
-                  </div>
+                        </div>
                   </div>
                 </div>
               );
@@ -7700,7 +7700,7 @@ export default function WerkstattVerwaltungApp() {
           </div>
         </div>
         
-      </div>
+        </div>
       <div className="bg-white rounded-2xl shadow p-5">
         <div className="text-xs font-medium text-gray-500 mb-2">Band auswählen — Upload, Auto-Zuordnung und manuelle Anpassung beziehen sich auf dieses Band:</div>
         {bandSwitcher}
@@ -7908,7 +7908,7 @@ export default function WerkstattVerwaltungApp() {
                       {Object.keys(workshops).length} aktiv
                       {Object.keys(archivedWorkshops).length > 0 ? ` · ${Object.keys(archivedWorkshops).length} archiviert` : ''}
                     </p>
-                  </div>
+                        </div>
                   <button
                     type="button"
                     onClick={() => setActiveWorkshopEditor('new')}
@@ -7916,19 +7916,19 @@ export default function WerkstattVerwaltungApp() {
                   >
                     + Neue Werkstatt
                   </button>
-                </div>
+                          </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-2 min-h-0">
                   {Object.keys(workshops).length === 0 && Object.keys(archivedWorkshops).length === 0 && (
                     <div className="text-gray-500 italic p-6 bg-white/70 rounded-xl text-center border border-dashed border-blue-200 text-sm">
                       Noch keine Werkstätten. Oben „Neue Werkstatt“ wählen.
-                    </div>
-                  )}
+                          </div>
+                        )}
                   {[...Object.keys(workshops)].sort((a, b) => a.localeCompare(b, 'de')).map(name => {
                     const cap = getWorkshopCapacity(workshops[name], name);
                     const isSelected = activeWorkshopEditor?.type === 'active' && activeWorkshopEditor.name === name;
                     const dot = workshopColors[name];
                     return (
-                      <button
+                        <button 
                         key={name}
                         type="button"
                         onClick={() => setActiveWorkshopEditor({ type: 'active', name })}
@@ -7947,7 +7947,7 @@ export default function WerkstattVerwaltungApp() {
                           <span className="font-semibold text-gray-800 truncate flex-1">{name}</span>
                           <span className="text-xs text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full shrink-0">{cap} Pl.</span>
                         </div>
-                      </button>
+                        </button>
                     );
                   })}
                   {Object.keys(archivedWorkshops).length > 0 && (
@@ -7956,7 +7956,7 @@ export default function WerkstattVerwaltungApp() {
                       {[...Object.keys(archivedWorkshops)].sort((a, b) => a.localeCompare(b, 'de')).map(name => {
                         const isSelected = activeWorkshopEditor?.type === 'archived' && activeWorkshopEditor.name === name;
                         return (
-                          <button
+                        <button 
                             key={`arch-${name}`}
                             type="button"
                             onClick={() => setActiveWorkshopEditor({ type: 'archived', name })}
@@ -7969,10 +7969,10 @@ export default function WerkstattVerwaltungApp() {
                             <div className="flex items-center gap-2 min-w-0">
                               <span className="font-medium text-gray-600 truncate flex-1">{name}</span>
                               <span className="text-[10px] px-2 py-0.5 bg-gray-400 text-white rounded-full shrink-0">Archiv</span>
-                            </div>
+                      </div>
                           </button>
-                        );
-                      })}
+                    );
+                  })}
                     </>
                   )}
                 </div>
@@ -7995,26 +7995,26 @@ export default function WerkstattVerwaltungApp() {
                           ? 'Archivierte Werkstatt · Reaktivieren oder endgültig löschen'
                           : 'Kapazität, Bänder, Lehrkraft und Regeln'}
                   </p>
-                </div>
+                            </div>
                 <div className="flex-1 overflow-y-auto px-6 py-5 min-h-0">
                   {activeWorkshopEditor == null ? (
                     <div className="flex flex-col items-center justify-center h-full min-h-[16rem] text-center text-gray-500 px-4">
                       <p className="text-sm max-w-sm">
                         Wählen Sie links eine Werkstatt, oder klicken Sie auf <strong>+ Neue Werkstatt</strong>.
                       </p>
-                    </div>
+                            </div>
                   ) : activeWorkshopEditor === 'new' ? (
                     <AddWorkshopForm onAdd={(n, c) => addWorkshop(n, c)} />
                   ) : activeWorkshopEditor.type === 'active' && !workshops[activeWorkshopEditor.name] ? (
-                    <div className="text-sm text-gray-600">
+                              <div className="text-sm text-gray-600">
                       Diese Werkstatt existiert nicht mehr.{' '}
                       <button type="button" className="text-blue-700 underline" onClick={() => setActiveWorkshopEditor(null)}>Schließen</button>
-                    </div>
+                              </div>
                   ) : activeWorkshopEditor.type === 'archived' && !archivedWorkshops[activeWorkshopEditor.name] ? (
                     <div className="text-sm text-gray-600">
                       Archiv-Eintrag nicht mehr vorhanden.{' '}
                       <button type="button" className="text-blue-700 underline" onClick={() => setActiveWorkshopEditor(null)}>Schließen</button>
-                    </div>
+                          </div>
                   ) : activeWorkshopEditor.type === 'active' ? (
                     <WorkshopDetailEditor
                       key={activeWorkshopEditor.name}
@@ -8074,8 +8074,8 @@ export default function WerkstattVerwaltungApp() {
                       onRequestRename={requestRenameWorkshop}
                       onClose={() => setActiveWorkshopEditor(null)}
                     />
-                  )}
-                </div>
+                )}
+              </div>
               </main>
             </div>
           </div>
@@ -8132,18 +8132,18 @@ export default function WerkstattVerwaltungApp() {
                             <span className="text-base font-semibold text-gray-800 truncate">{r.name || 'Ohne Name'}</span>
                             <span className={`text-xs px-2 py-0.5 rounded-full shrink-0 ${badgeClass}`}>
                               {getRuleTypeLabel(ruleType)}
-                            </span>
-                          </div>
+                              </span>
+                            </div>
                           <p className="text-xs text-slate-600 mt-1 truncate">{formatRuleZeitraumLabel(r)}</p>
                         </button>
-                        <button
+                          <button 
                           type="button"
                           title="Regel duplizieren (Kopie zum Bearbeiten)"
                           onClick={() => duplicateRule(r.id)}
                           className="shrink-0 px-3 border-l border-gray-200/80 text-xs font-semibold text-purple-700 hover:bg-purple-50 transition-colors"
                         >
                           Duplizieren
-                        </button>
+                          </button>
                       </div>
                     );
                   })}
@@ -8165,14 +8165,14 @@ export default function WerkstattVerwaltungApp() {
                         ? 'Typ, Zeitraum und Kurse festlegen'
                         : 'Typ ist fest · Zeitraum und Inhalte anpassen'}
                   </p>
-                </div>
+              </div>
                 <div className="flex-1 overflow-y-auto px-6 py-5 min-h-0">
                   {activeRuleEditor == null ? (
                     <div className="flex flex-col items-center justify-center h-full min-h-[16rem] text-center text-gray-500 px-4">
                       <p className="text-sm max-w-sm">
                         Wählen Sie links eine Belegungs-Regel zum Bearbeiten, oder klicken Sie auf <strong>+ Neue Regel</strong>.
                       </p>
-                    </div>
+              </div>
                   ) : activeRuleEditor !== 'new' && !rules.some(r => r.id === activeRuleEditor) ? (
                     <div className="text-sm text-gray-600">
                       Diese Regel existiert nicht mehr.{' '}
@@ -8190,6 +8190,7 @@ export default function WerkstattVerwaltungApp() {
                           : rules.find(r => r.id === activeRuleEditor)
                       }
                       workshops={Object.keys(workshops)}
+                      archivedWorkshops={Object.keys(archivedWorkshops)}
                       klassenStufenPool={klassenStufenPool}
                       onAddKlassenStufe={addKlassenStufeToPool}
                       onSave={(payload) => {
@@ -8259,7 +8260,7 @@ export default function WerkstattVerwaltungApp() {
                   Umbenennen bestätigen
                 </button>
               </div>
-            </div>
+                  </div>
           )}
         </DialogContent>
       </Dialog>
@@ -8834,6 +8835,7 @@ function RuleEditorForm({
   mode,
   initialRule,
   workshops,
+  archivedWorkshops = [],
   klassenStufenPool,
   onAddKlassenStufe,
   onSave,
@@ -8857,10 +8859,28 @@ function RuleEditorForm({
   const [fromCourse, setFromCourse] = useState(init.fromCourse);
   const [toCourse, setToCourse] = useState(init.toCourse);
   const [sameBand, setSameBand] = useState(init.sameBand);
+  const archivedSet = useMemo(() => new Set(archivedWorkshops), [archivedWorkshops]);
+  const [archivedPickerOpen, setArchivedPickerOpen] = useState(() => {
+    const selectedArchived = (init.selected || []).some(name => archivedWorkshops.includes(name));
+    const folgeArchived =
+      archivedWorkshops.includes(init.fromCourse) || archivedWorkshops.includes(init.toCourse);
+    return selectedArchived || folgeArchived;
+  });
 
-  const sortedWorkshops = useMemo(
+  const sortedActiveWorkshops = useMemo(
     () => [...workshops].sort((a, b) => a.localeCompare(b, 'de')),
     [workshops]
+  );
+  const sortedArchivedWorkshops = useMemo(
+    () => [...archivedWorkshops].sort((a, b) => a.localeCompare(b, 'de')),
+    [archivedWorkshops]
+  );
+  const orphanSelections = useMemo(
+    () =>
+      selected.filter(
+        name => !workshops.includes(name) && !archivedWorkshops.includes(name)
+      ),
+    [selected, workshops, archivedWorkshops]
   );
 
   useEffect(() => {
@@ -8971,19 +8991,19 @@ function RuleEditorForm({
           <p className="text-sm font-semibold text-gray-900 mt-0.5">{getRuleTypeLabel(ruleType)}</p>
         </div>
       ) : (
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-2">Regel-Typ</label>
-          <select 
-            value={ruleType} 
+      <div>
+        <label className="block text-sm font-medium text-gray-700 mb-2">Regel-Typ</label>
+        <select 
+          value={ruleType} 
             onChange={e => { setRuleType(e.target.value); setSelected([]); }}
-            className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
-          >
+          className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
+        >
             <option value="belegung">Alle ausgewählten Kurse (jeder mindestens 1×)</option>
             <option value="mindestbelegung">Mindestanzahl aus Kurs-Pool</option>
-            <option value="folgekurs">Folgekurs-Regel</option>
+          <option value="folgekurs">Folgekurs-Regel</option>
             <option value="freitext">Freitext / manuelle Checkliste</option>
-          </select>
-        </div>
+        </select>
+      </div>
       )}
       
       <div>
@@ -9030,19 +9050,45 @@ function RuleEditorForm({
           <div>
             <div className="flex flex-wrap items-center justify-between gap-2 mb-2">
               <label className="text-sm font-medium text-gray-700">
-                Kurse für diese Regel ({selected.length}/{sortedWorkshops.length})
+                Kurse für diese Regel ({selected.length} gewählt · {sortedActiveWorkshops.length} aktiv)
               </label>
               <div className="flex gap-2">
-                <button type="button" onClick={() => setSelected([...sortedWorkshops])} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">
-                  Alle auswählen
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelected(prev => [...new Set([...prev, ...sortedActiveWorkshops])])
+                  }
+                  className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200"
+                >
+                  Alle aktiven
                 </button>
                 <button type="button" onClick={() => setSelected([])} className="text-xs px-2 py-1 rounded bg-gray-100 hover:bg-gray-200">
                   Auswahl leeren
                 </button>
               </div>
             </div>
+            {orphanSelections.length > 0 && (
+              <div className="mb-2 rounded-lg border border-amber-200 bg-amber-50 p-2">
+                <p className="text-xs text-amber-900 mb-2">
+                  Bereits in der Regel, aber weder aktiv noch archiviert (z. B. gelöscht):
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  {orphanSelections.map(w => (
+                    <label key={w} className="inline-flex items-center gap-1.5 text-sm text-gray-800">
+                      <input
+                        type="checkbox"
+                        checked={selected.includes(w)}
+                        onChange={() => toggleOpt(w)}
+                        className="w-4 h-4 text-orange-600 rounded"
+                      />
+                      {w}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[min(20rem,calc(100vh-22rem))] overflow-y-auto pr-1">
-              {sortedWorkshops.map(w => (
+              {sortedActiveWorkshops.map(w => (
                 <div key={w} className="flex items-center p-2 bg-white rounded-lg border border-gray-200 hover:bg-gray-50 transition-all duration-200">
                   <input 
                     type="checkbox" 
@@ -9054,6 +9100,52 @@ function RuleEditorForm({
                 </div>
               ))}
             </div>
+            {sortedArchivedWorkshops.length > 0 && (
+              <details
+                className="mt-3 rounded-lg border border-slate-200 bg-slate-50/80"
+                open={archivedPickerOpen}
+                onToggle={e => setArchivedPickerOpen(e.currentTarget.open)}
+              >
+                <summary className="cursor-pointer select-none px-3 py-2.5 text-sm font-medium text-slate-700 hover:bg-slate-100/80 rounded-lg list-none [&::-webkit-details-marker]:hidden">
+                  <span className="inline-flex items-center gap-2">
+                    <span className="text-slate-500" aria-hidden>▸</span>
+                    Archivierte Kurse einblenden ({sortedArchivedWorkshops.length})
+                  </span>
+                  <span className="block text-xs font-normal text-slate-500 mt-0.5 pl-5">
+                    Nicht im aktuellen Angebot, zählen aber in der Belegungshistorie.
+                  </span>
+                </summary>
+                <div className="px-3 pb-3 pt-1 border-t border-slate-200">
+                  <div className="flex justify-end mb-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSelected(prev => [...new Set([...prev, ...sortedArchivedWorkshops])])
+                      }
+                      className="text-xs px-2 py-1 rounded bg-white border border-slate-200 hover:bg-slate-100"
+                    >
+                      Alle archivierten
+                    </button>
+          </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+                    {sortedArchivedWorkshops.map(w => (
+                      <div key={w} className="flex items-center p-2 bg-white rounded-lg border border-dashed border-slate-300">
+                        <input
+                          type="checkbox"
+                          checked={selected.includes(w)}
+                          onChange={() => toggleOpt(w)}
+                          className="w-4 h-4 text-orange-600 bg-gray-100 border-gray-300 rounded focus:ring-orange-500"
+                        />
+                        <label className="ml-2 text-sm text-slate-700 cursor-pointer">
+                          {w}
+                          <span className="ml-1 text-[10px] uppercase tracking-wide text-slate-500">Archiv</span>
+                        </label>
+              </div>
+                    ))}
+            </div>
+          </div>
+              </details>
+            )}
           </div>
           {ruleType === "belegung" && (
             <p className="text-xs text-blue-700 bg-blue-50 border border-blue-200 rounded-lg p-3">
@@ -9068,6 +9160,17 @@ function RuleEditorForm({
         </>
       ) : ruleType === "folgekurs" ? (
         <>
+          {sortedArchivedWorkshops.length > 0 && (
+            <details
+              className="rounded-lg border border-slate-200 bg-slate-50/80"
+              open={archivedPickerOpen}
+              onToggle={e => setArchivedPickerOpen(e.currentTarget.open)}
+            >
+              <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100/80 rounded-lg list-none [&::-webkit-details-marker]:hidden">
+                Archivierte Kurse in den Dropdowns anzeigen ({sortedArchivedWorkshops.length})
+              </summary>
+            </details>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Ausgangskurs (wenn Schüler diesen Kurs belegt):</label>
             <select 
@@ -9076,9 +9179,19 @@ function RuleEditorForm({
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
             >
               <option value="">-- Ausgangskurs wählen --</option>
-              {sortedWorkshops.map(w => (
+              {sortedActiveWorkshops.map(w => (
                 <option key={w} value={w}>{w}</option>
               ))}
+              {(archivedPickerOpen || archivedSet.has(fromCourse)) && sortedArchivedWorkshops.length > 0 && (
+                <optgroup label="Archiviert">
+                  {sortedArchivedWorkshops.map(w => (
+                    <option key={w} value={w}>{w}</option>
+                  ))}
+                </optgroup>
+              )}
+              {fromCourse && !workshops.includes(fromCourse) && !archivedWorkshops.includes(fromCourse) && (
+                <option value={fromCourse}>{fromCourse} (nicht in Liste)</option>
+              )}
             </select>
           </div>
           <div>
@@ -9089,9 +9202,19 @@ function RuleEditorForm({
               className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-500 focus:border-transparent transition-all duration-200"
             >
               <option value="">-- Folgekurs wählen --</option>
-              {sortedWorkshops.map(w => (
+              {sortedActiveWorkshops.map(w => (
                 <option key={w} value={w}>{w}</option>
               ))}
+              {(archivedPickerOpen || archivedSet.has(toCourse)) && sortedArchivedWorkshops.length > 0 && (
+                <optgroup label="Archiviert">
+                  {sortedArchivedWorkshops.map(w => (
+                    <option key={w} value={w}>{w}</option>
+                  ))}
+                </optgroup>
+              )}
+              {toCourse && !workshops.includes(toCourse) && !archivedWorkshops.includes(toCourse) && (
+                <option value={toCourse}>{toCourse} (nicht in Liste)</option>
+              )}
             </select>
           </div>
           <div className="flex items-center p-3 bg-white rounded-lg border border-gray-200">
@@ -9120,13 +9243,13 @@ function RuleEditorForm({
       ) : null}
       
       <div className="flex flex-col sm:flex-row gap-3 pt-2">
-        <button 
+      <button 
           type="button"
-          onClick={submit} 
+        onClick={submit} 
           className="flex-1 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white font-semibold rounded-lg shadow-sm hover:from-orange-600 hover:to-orange-700 hover:shadow-md transition-all duration-200"
-        >
+      >
           {isEdit ? 'Änderungen speichern' : 'Regel erstellen'}
-        </button>
+      </button>
         {onCancel && (
           <button
             type="button"
@@ -9174,9 +9297,9 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
       });
       return { slotKey, timestamp: payload.timestamp, bandIds, bandAssignments, isMultiBand: true };
     }
-    return {
-      slotKey,
-      timestamp: payload.timestamp,
+      return { 
+        slotKey, 
+        timestamp: payload.timestamp, 
       assigned: payload.assignments?.[student] || 'Nicht Zugeordnet',
       isMultiBand: false,
     };
@@ -9230,14 +9353,14 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
               </td>
               {displayBandIds.map(bandId => (
                 <td key={bandId} className="px-4 py-3 border-b border-gray-100">
-                  {s.isMultiBand ? (
+                {s.isMultiBand ? (
                     renderAssignmentBadge(s.bandAssignments[bandId] || 'Nicht Zugeordnet')
                   ) : (
                     bandId === displayBandIds[0]
                       ? renderAssignmentBadge(s.assigned)
                       : <div className="text-gray-400 text-xs">—</div>
-                  )}
-                </td>
+                )}
+              </td>
               ))}
               <td className="px-4 py-3 border-b border-gray-100">
                 {s.isMultiBand ? (
@@ -9245,22 +9368,22 @@ function StudentHistoryTable({ student, confirmedAssignments, workshops, onChang
                     {s.bandIds.map(bandId => (
                       <div key={bandId}>
                         <div className="text-xs text-gray-600 mb-1 font-medium">{getBandLabel(bandId)}:</div>
-                        <select
+                      <select 
                           value={s.bandAssignments[bandId]}
                           onChange={(e) => onChangeAssignment(s.slotKey, student, e.target.value, bandId)}
-                          className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
-                        >
+                        className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
+                      >
                           <option value="Nicht Zugeordnet">Nicht Zugeordnet</option>
-                          {workshops.map(w => (
-                            <option key={w} value={w}>{w}</option>
-                          ))}
-                        </select>
-                      </div>
+                        {workshops.map(w => (
+                          <option key={w} value={w}>{w}</option>
+                        ))}
+                      </select>
+                    </div>
                     ))}
                   </div>
                 ) : (
-                  <select
-                    value={s.assigned}
+                  <select 
+                    value={s.assigned} 
                     onChange={(e) => onChangeAssignment(s.slotKey, student, e.target.value)}
                     className="w-full px-2 py-1 text-xs border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-transparent transition-all duration-200"
                   >
