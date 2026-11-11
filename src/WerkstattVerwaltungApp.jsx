@@ -1620,6 +1620,38 @@ function countDistinctWorkshopsFromOptions(historyFlat, options) {
   return matched.size;
 }
 
+function WahlWishChips({ choices, wahlCount, workshopColors, dense = false }) {
+  const slots = Math.max(1, wahlCount || 2);
+  const list = Array.isArray(choices) ? choices : [];
+  return (
+    <div className={`flex flex-wrap gap-1 ${dense ? '' : 'gap-2'}`}>
+      {Array.from({ length: slots }, (_, i) => {
+        const c = list[i];
+        const color = c ? workshopColors?.[c] : null;
+        return (
+          <span
+            key={i}
+            className={`text-xs px-2 py-1 rounded-md border ${
+              dense ? 'bg-gray-100 border-gray-200' : 'bg-white border-gray-200 shadow-sm'
+            }`}
+            style={
+              color
+                ? {
+                    backgroundColor: `${color}20`,
+                    borderLeft: `3px solid ${color}`,
+                    color: '#1f2937',
+                  }
+                : undefined
+            }
+          >
+            {i + 1}. {c || '—'}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 function ruleToExportRow(item) {
   const ruleType = item.type || 'belegung';
   return [
@@ -2759,6 +2791,14 @@ export default function WerkstattVerwaltungApp() {
     () => getTrimesterWahlCount(activeTrimesterPlan),
     [activeTrimesterPlan]
   );
+  const choicesForWahlTrimester = useMemo(
+    () => loadChoicesForTrimesterKey(wahlTrimesterKey),
+    [wahlTrimesterKey, loadChoicesForTrimesterKey, uploadedChoices]
+  );
+  const wahlBandIdsForPlan = useMemo(() => {
+    if (activeTrimesterPlan) return getPlanBandIds(activeTrimesterPlan);
+    return activeBandIds;
+  }, [activeTrimesterPlan, activeBandIds]);
   const definedTrimesterList = useMemo(() => plansAsSortedList(trimesterPlans), [trimesterPlans]);
   const [activeBand, setActiveBand] = useState('erstesBand'); // Track which Band is currently active
   const wahlVisibleWorkshops = useMemo(
@@ -2933,6 +2973,22 @@ export default function WerkstattVerwaltungApp() {
     // Reset upload summary
     setUploadSummary(null);
   }, [yearTrimester.schoolYearStart, yearTrimester.schoolYearEnd, yearTrimester.trimester, confirmedAssignments, students, tab, trimesterPlans]);
+
+  // Schüler-Tab: Wahlen aus dem Speicher laden (ohne vorher Wahl-Tab zu öffnen)
+  useEffect(() => {
+    if (tab !== 'students') return;
+    const saved = loadChoicesForTrimesterKey(wahlTrimesterKey);
+    isLoadingChoicesRef.current = true;
+    if (hasAnyChoicesInBands(saved, ALL_BAND_IDS)) {
+      setUploadedChoices(saved);
+    } else {
+      setUploadedChoices(createEmptyChoicesMap());
+    }
+    const t = setTimeout(() => {
+      isLoadingChoicesRef.current = false;
+    }, 300);
+    return () => clearTimeout(t);
+  }, [tab, wahlTrimesterKey, loadChoicesForTrimesterKey]);
 
   const studentNoteScopeRef = useRef('');
   useEffect(() => {
@@ -6910,42 +6966,67 @@ export default function WerkstattVerwaltungApp() {
                     </div>
 
                     <div className="bg-white rounded-lg p-4 shadow-sm border border-gray-200">
-                      <h3 className="text-base font-semibold text-gray-800 mb-3">Wahlabgabe (geladenes Trimester)</h3>
+                      <div className="mb-3">
+                        <h3 className="text-base font-semibold text-gray-800">Wahlabgabe</h3>
+                        <p className="text-xs text-gray-600 mt-1">
+                          Trimester:{' '}
+                          <span className="font-medium text-gray-800">
+                            {formatYearTrimester(
+                              yearTrimester.schoolYearStart,
+                              yearTrimester.schoolYearEnd,
+                              yearTrimester.trimester
+                            )}
+                          </span>
+                          {' · '}
+                          {activeTrimesterWahlCount} Wünsche pro Band
+                          <span className="text-gray-500"> (wechseln unter Tab „Wahl & Zuordnung“)</span>
+                        </p>
+                      </div>
                       <div className="space-y-3">
-                        {activeBandIds.map(bandId => {
-                          const choices = getChoicesForBand(bandId)[selectedStudent];
-                          const violations = choices
+                        {wahlBandIdsForPlan.map(bandId => {
+                          const choices = choicesForWahlTrimester[bandId]?.[selectedStudent];
+                          const expectsBand =
+                            !activeTrimesterPlan ||
+                            isStudentExpectedToVoteOnBand(
+                              selectedStudent,
+                              activeTrimesterPlan,
+                              bandId,
+                              studentEnrollmentYears,
+                              studentClasses
+                            );
+                          const hasChoices = Array.isArray(choices) && choices.some(Boolean);
+                          if (!expectsBand && !hasChoices) return null;
+                          const violations = hasChoices
                             ? checkViolationsForStudent(selectedStudent, choices)
                             : [];
                           return (
                             <div key={bandId} className="rounded-lg border border-gray-200 p-3 bg-gray-50/80">
                               <div className="text-sm font-semibold text-gray-800 mb-2">{getBandLabel(bandId)}</div>
-                              {!choices ? (
+                              {!hasChoices ? (
                                 <p className="text-sm text-gray-500 italic">Keine Wahldaten für dieses Band.</p>
                               ) : (
                                 <>
-                                  <div className="flex flex-wrap gap-2 mb-2">
-                                    {choices.map((choice, idx) => (
-                                      <span
-                                        key={idx}
-                                        className="text-xs px-2 py-1 rounded-md bg-white border border-gray-200"
-                                      >
-                                        {idx + 1}. {choice}
-                                      </span>
-                                    ))}
-                        </div>
+                                  <div className="mb-2">
+                                    <WahlWishChips
+                                      choices={choices}
+                                      wahlCount={activeTrimesterWahlCount}
+                                      workshopColors={workshopColors}
+                                    />
+                                  </div>
                                   {violations.length > 0 ? (
-                            <ul className="space-y-1">
+                                    <ul className="space-y-1">
                                       {violations.map((msg, idx) => (
-                                        <li key={idx} className="text-xs p-2 bg-red-50 border border-red-200 rounded text-red-700">{msg}</li>
-                              ))}
-                            </ul>
+                                        <li key={idx} className="text-xs p-2 bg-red-50 border border-red-200 rounded text-red-700">
+                                          {msg}
+                                        </li>
+                                      ))}
+                                    </ul>
                                   ) : (
                                     <p className="text-xs text-green-700">Keine Auffälligkeiten bei den Wahlen.</p>
                                   )}
                                 </>
-                            )}
-                          </div>
+                              )}
+                            </div>
                           );
                         })}
                       </div>
@@ -7552,9 +7633,13 @@ export default function WerkstattVerwaltungApp() {
                             )}
                           </div>
                           {getChoicesForBand(activeBand)[s] ? (
-                            <div className="text-xs text-gray-600 flex gap-1 mt-1">
-                              <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs">1. {getChoicesForBand(activeBand)[s][0] || '—'}</span>
-                              <span className="px-1.5 py-0.5 bg-gray-100 rounded text-xs">2. {getChoicesForBand(activeBand)[s][1] || '—'}</span>
+                            <div className="mt-1">
+                              <WahlWishChips
+                                choices={getChoicesForBand(activeBand)[s]}
+                                wahlCount={activeTrimesterWahlCount}
+                                workshopColors={workshopColors}
+                                dense
+                              />
                             </div>
                           ) : null}
                           {renderStudentNotes(s, w)}
@@ -7645,9 +7730,13 @@ export default function WerkstattVerwaltungApp() {
                         )}
                       </div>
                       {getChoicesForBand(activeBand)[s] ? (
-                        <div className="text-xs text-gray-600 flex gap-1 mt-1">
-                          <span className="px-1.5 py-0.5 bg-orange-100 rounded text-xs">1. {getChoicesForBand(activeBand)[s][0] || '—'}</span>
-                          <span className="px-1.5 py-0.5 bg-orange-100 rounded text-xs">2. {getChoicesForBand(activeBand)[s][1] || '—'}</span>
+                        <div className="mt-1">
+                          <WahlWishChips
+                            choices={getChoicesForBand(activeBand)[s]}
+                            wahlCount={activeTrimesterWahlCount}
+                            workshopColors={workshopColors}
+                            dense
+                          />
                         </div>
                       ) : null}
                       {renderStudentNotes(s, null)}
