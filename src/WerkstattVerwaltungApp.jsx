@@ -2791,10 +2791,6 @@ export default function WerkstattVerwaltungApp() {
     () => getTrimesterWahlCount(activeTrimesterPlan),
     [activeTrimesterPlan]
   );
-  const choicesForWahlTrimester = useMemo(
-    () => loadChoicesForTrimesterKey(wahlTrimesterKey),
-    [wahlTrimesterKey, loadChoicesForTrimesterKey, uploadedChoices]
-  );
   const wahlBandIdsForPlan = useMemo(() => {
     if (activeTrimesterPlan) return getPlanBandIds(activeTrimesterPlan);
     return activeBandIds;
@@ -6984,7 +6980,7 @@ export default function WerkstattVerwaltungApp() {
                       </div>
                       <div className="space-y-3">
                         {wahlBandIdsForPlan.map(bandId => {
-                          const choices = choicesForWahlTrimester[bandId]?.[selectedStudent];
+                          const choices = uploadedChoices[bandId]?.[selectedStudent];
                           const expectsBand =
                             !activeTrimesterPlan ||
                             isStudentExpectedToVoteOnBand(
